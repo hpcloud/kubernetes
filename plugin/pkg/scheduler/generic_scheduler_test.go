@@ -27,25 +27,27 @@ import (
 	"k8s.io/kubernetes/pkg/util/sets"
 	"k8s.io/kubernetes/plugin/pkg/scheduler/algorithm"
 	schedulerapi "k8s.io/kubernetes/plugin/pkg/scheduler/api"
+	"k8s.io/kubernetes/plugin/pkg/scheduler/schedulercache"
+	schedulertesting "k8s.io/kubernetes/plugin/pkg/scheduler/testing"
 )
 
-func falsePredicate(pod *api.Pod, existingPods []*api.Pod, node string) (bool, error) {
+func falsePredicate(pod *api.Pod, nodeName string, nodeInfo *schedulercache.NodeInfo) (bool, error) {
 	return false, nil
 }
 
-func truePredicate(pod *api.Pod, existingPods []*api.Pod, node string) (bool, error) {
+func truePredicate(pod *api.Pod, nodeName string, nodeInfo *schedulercache.NodeInfo) (bool, error) {
 	return true, nil
 }
 
-func matchesPredicate(pod *api.Pod, existingPods []*api.Pod, node string) (bool, error) {
-	return pod.Name == node, nil
+func matchesPredicate(pod *api.Pod, nodeName string, nodeInfo *schedulercache.NodeInfo) (bool, error) {
+	return pod.Name == nodeName, nil
 }
 
-func hasNoPodsPredicate(pod *api.Pod, existingPods []*api.Pod, node string) (bool, error) {
-	return len(existingPods) == 0, nil
+func hasNoPodsPredicate(pod *api.Pod, nodeName string, nodeInfo *schedulercache.NodeInfo) (bool, error) {
+	return len(nodeInfo.Pods()) == 0, nil
 }
 
-func numericPriority(pod *api.Pod, podLister algorithm.PodLister, nodeLister algorithm.NodeLister) (schedulerapi.HostPriorityList, error) {
+func numericPriority(pod *api.Pod, nodeNameToInfo map[string]*schedulercache.NodeInfo, nodeLister algorithm.NodeLister) (schedulerapi.HostPriorityList, error) {
 	nodes, err := nodeLister.List()
 	result := []schedulerapi.HostPriority{}
 
@@ -65,11 +67,11 @@ func numericPriority(pod *api.Pod, podLister algorithm.PodLister, nodeLister alg
 	return result, nil
 }
 
-func reverseNumericPriority(pod *api.Pod, podLister algorithm.PodLister, nodeLister algorithm.NodeLister) (schedulerapi.HostPriorityList, error) {
+func reverseNumericPriority(pod *api.Pod, nodeNameToInfo map[string]*schedulercache.NodeInfo, nodeLister algorithm.NodeLister) (schedulerapi.HostPriorityList, error) {
 	var maxScore float64
 	minScore := math.MaxFloat64
 	reverseResult := []schedulerapi.HostPriority{}
-	result, err := numericPriority(pod, podLister, nodeLister)
+	result, err := numericPriority(pod, nodeNameToInfo, nodeLister)
 	if err != nil {
 		return nil, err
 	}
@@ -166,14 +168,14 @@ func TestSelectHost(t *testing.T) {
 
 func TestGenericScheduler(t *testing.T) {
 	tests := []struct {
-		name         string
-		predicates   map[string]algorithm.FitPredicate
-		prioritizers []algorithm.PriorityConfig
-		nodes        []string
-		pod          *api.Pod
-		pods         []*api.Pod
-		expectedHost string
-		expectsErr   bool
+		name          string
+		predicates    map[string]algorithm.FitPredicate
+		prioritizers  []algorithm.PriorityConfig
+		nodes         []string
+		pod           *api.Pod
+		pods          []*api.Pod
+		expectedHosts sets.String
+		expectsErr    bool
 	}{
 		{
 			predicates:   map[string]algorithm.FitPredicate{"false": falsePredicate},
@@ -183,44 +185,43 @@ func TestGenericScheduler(t *testing.T) {
 			name:         "test 1",
 		},
 		{
-			predicates:   map[string]algorithm.FitPredicate{"true": truePredicate},
-			prioritizers: []algorithm.PriorityConfig{{Function: EqualPriority, Weight: 1}},
-			nodes:        []string{"machine1", "machine2"},
-			// Random choice between both, the rand seeded above with zero, chooses "machine1"
-			expectedHost: "machine1",
-			name:         "test 2",
+			predicates:    map[string]algorithm.FitPredicate{"true": truePredicate},
+			prioritizers:  []algorithm.PriorityConfig{{Function: EqualPriority, Weight: 1}},
+			nodes:         []string{"machine1", "machine2"},
+			expectedHosts: sets.NewString("machine1", "machine2"),
+			name:          "test 2",
 		},
 		{
 			// Fits on a machine where the pod ID matches the machine name
-			predicates:   map[string]algorithm.FitPredicate{"matches": matchesPredicate},
-			prioritizers: []algorithm.PriorityConfig{{Function: EqualPriority, Weight: 1}},
-			nodes:        []string{"machine1", "machine2"},
-			pod:          &api.Pod{ObjectMeta: api.ObjectMeta{Name: "machine2"}},
-			expectedHost: "machine2",
-			name:         "test 3",
+			predicates:    map[string]algorithm.FitPredicate{"matches": matchesPredicate},
+			prioritizers:  []algorithm.PriorityConfig{{Function: EqualPriority, Weight: 1}},
+			nodes:         []string{"machine1", "machine2"},
+			pod:           &api.Pod{ObjectMeta: api.ObjectMeta{Name: "machine2"}},
+			expectedHosts: sets.NewString("machine2"),
+			name:          "test 3",
 		},
 		{
-			predicates:   map[string]algorithm.FitPredicate{"true": truePredicate},
-			prioritizers: []algorithm.PriorityConfig{{Function: numericPriority, Weight: 1}},
-			nodes:        []string{"3", "2", "1"},
-			expectedHost: "3",
-			name:         "test 4",
+			predicates:    map[string]algorithm.FitPredicate{"true": truePredicate},
+			prioritizers:  []algorithm.PriorityConfig{{Function: numericPriority, Weight: 1}},
+			nodes:         []string{"3", "2", "1"},
+			expectedHosts: sets.NewString("3"),
+			name:          "test 4",
 		},
 		{
-			predicates:   map[string]algorithm.FitPredicate{"matches": matchesPredicate},
-			prioritizers: []algorithm.PriorityConfig{{Function: numericPriority, Weight: 1}},
-			nodes:        []string{"3", "2", "1"},
-			pod:          &api.Pod{ObjectMeta: api.ObjectMeta{Name: "2"}},
-			expectedHost: "2",
-			name:         "test 5",
+			predicates:    map[string]algorithm.FitPredicate{"matches": matchesPredicate},
+			prioritizers:  []algorithm.PriorityConfig{{Function: numericPriority, Weight: 1}},
+			nodes:         []string{"3", "2", "1"},
+			pod:           &api.Pod{ObjectMeta: api.ObjectMeta{Name: "2"}},
+			expectedHosts: sets.NewString("2"),
+			name:          "test 5",
 		},
 		{
-			predicates:   map[string]algorithm.FitPredicate{"true": truePredicate},
-			prioritizers: []algorithm.PriorityConfig{{Function: numericPriority, Weight: 1}, {Function: reverseNumericPriority, Weight: 2}},
-			nodes:        []string{"3", "2", "1"},
-			pod:          &api.Pod{ObjectMeta: api.ObjectMeta{Name: "2"}},
-			expectedHost: "1",
-			name:         "test 6",
+			predicates:    map[string]algorithm.FitPredicate{"true": truePredicate},
+			prioritizers:  []algorithm.PriorityConfig{{Function: numericPriority, Weight: 1}, {Function: reverseNumericPriority, Weight: 2}},
+			nodes:         []string{"3", "2", "1"},
+			pod:           &api.Pod{ObjectMeta: api.ObjectMeta{Name: "2"}},
+			expectedHosts: sets.NewString("1"),
+			name:          "test 6",
 		},
 		{
 			predicates:   map[string]algorithm.FitPredicate{"true": truePredicate, "false": falsePredicate},
@@ -252,43 +253,11 @@ func TestGenericScheduler(t *testing.T) {
 			expectsErr:   true,
 			name:         "test 8",
 		},
-		{
-			predicates: map[string]algorithm.FitPredicate{
-				"nopods":  hasNoPodsPredicate,
-				"matches": matchesPredicate,
-			},
-			pods: []*api.Pod{
-				{
-					ObjectMeta: api.ObjectMeta{Name: "2"},
-					Spec: api.PodSpec{
-						NodeName: "2",
-					},
-					Status: api.PodStatus{
-						Phase: api.PodFailed,
-					},
-				},
-				{
-					ObjectMeta: api.ObjectMeta{Name: "3"},
-					Spec: api.PodSpec{
-						NodeName: "2",
-					},
-					Status: api.PodStatus{
-						Phase: api.PodSucceeded,
-					},
-				},
-			},
-			pod: &api.Pod{ObjectMeta: api.ObjectMeta{Name: "2"}},
-
-			prioritizers: []algorithm.PriorityConfig{{Function: numericPriority, Weight: 1}},
-			nodes:        []string{"1", "2"},
-			expectedHost: "2",
-			name:         "test 9",
-		},
 	}
 
 	for _, test := range tests {
 		random := rand.New(rand.NewSource(0))
-		scheduler := NewGenericScheduler(test.predicates, test.prioritizers, []algorithm.SchedulerExtender{}, algorithm.FakePodLister(test.pods), random)
+		scheduler := NewGenericScheduler(schedulertesting.PodsToCache(test.pods), test.predicates, test.prioritizers, []algorithm.SchedulerExtender{}, random)
 		machine, err := scheduler.Schedule(test.pod, algorithm.FakeNodeLister(makeNodeList(test.nodes)))
 		if test.expectsErr {
 			if err == nil {
@@ -298,8 +267,8 @@ func TestGenericScheduler(t *testing.T) {
 			if err != nil {
 				t.Errorf("Unexpected error: %v", err)
 			}
-			if test.expectedHost != machine {
-				t.Errorf("Failed : %s, Expected: %s, Saw: %s", test.name, test.expectedHost, machine)
+			if !test.expectedHosts.Has(machine) {
+				t.Errorf("Failed : %s, Expected: %s, Saw: %s", test.name, test.expectedHosts, machine)
 			}
 		}
 	}
@@ -308,7 +277,12 @@ func TestGenericScheduler(t *testing.T) {
 func TestFindFitAllError(t *testing.T) {
 	nodes := []string{"3", "2", "1"}
 	predicates := map[string]algorithm.FitPredicate{"true": truePredicate, "false": falsePredicate}
-	_, predicateMap, err := findNodesThatFit(&api.Pod{}, algorithm.FakePodLister([]*api.Pod{}), predicates, makeNodeList(nodes), nil)
+	nodeNameToInfo := map[string]*schedulercache.NodeInfo{
+		"3": schedulercache.NewNodeInfo(),
+		"2": schedulercache.NewNodeInfo(),
+		"1": schedulercache.NewNodeInfo(),
+	}
+	_, predicateMap, err := findNodesThatFit(&api.Pod{}, nodeNameToInfo, predicates, makeNodeList(nodes), nil)
 
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
@@ -333,7 +307,12 @@ func TestFindFitSomeError(t *testing.T) {
 	nodes := []string{"3", "2", "1"}
 	predicates := map[string]algorithm.FitPredicate{"true": truePredicate, "match": matchesPredicate}
 	pod := &api.Pod{ObjectMeta: api.ObjectMeta{Name: "1"}}
-	_, predicateMap, err := findNodesThatFit(pod, algorithm.FakePodLister([]*api.Pod{}), predicates, makeNodeList(nodes), nil)
+	nodeNameToInfo := map[string]*schedulercache.NodeInfo{
+		"3": schedulercache.NewNodeInfo(),
+		"2": schedulercache.NewNodeInfo(),
+		"1": schedulercache.NewNodeInfo(pod),
+	}
+	_, predicateMap, err := findNodesThatFit(pod, nodeNameToInfo, predicates, makeNodeList(nodes), nil)
 
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)

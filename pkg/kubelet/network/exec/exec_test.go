@@ -30,11 +30,13 @@ import (
 	"text/template"
 
 	"k8s.io/kubernetes/pkg/kubelet/network"
+	nettest "k8s.io/kubernetes/pkg/kubelet/network/testing"
 	"k8s.io/kubernetes/pkg/util/sets"
+	utiltesting "k8s.io/kubernetes/pkg/util/testing"
 )
 
 func tmpDirOrDie() string {
-	dir, err := ioutil.TempDir(os.TempDir(), "exec-test")
+	dir, err := utiltesting.MkTmpdir("exec-test")
 	if err != nil {
 		panic(fmt.Sprintf("error creating tmp dir: %v", err))
 	}
@@ -70,16 +72,17 @@ func installPluginUnderTest(t *testing.T, vendorName, testPluginPath, plugName s
 	pluginDir := path.Join(testPluginPath, vendoredName)
 	err := os.MkdirAll(pluginDir, 0777)
 	if err != nil {
-		t.Errorf("Failed to create plugin: %v", err)
+		t.Errorf("Failed to create plugin dir %q: %v", pluginDir, err)
 	}
 	pluginExec := path.Join(pluginDir, plugName)
 	f, err := os.Create(pluginExec)
 	if err != nil {
-		t.Errorf("Failed to install plugin")
+		t.Errorf("Failed to install plugin %q: %v", pluginExec, err)
 	}
+	defer f.Close()
 	err = f.Chmod(0777)
 	if err != nil {
-		t.Errorf("Failed to set exec perms on plugin")
+		t.Errorf("Failed to set exec perms on plugin %q: %v", pluginExec, err)
 	}
 	const execScriptTempl = `#!/bin/bash
 
@@ -91,7 +94,7 @@ if [ "$1" == "status" ]; then
 fi
 
 # Direct the arguments to a file to be tested against later
-echo -n $@ &> {{.OutputFile}}
+echo -n "$@" &> {{.OutputFile}}
 `
 	if execTemplateData == nil {
 		execTemplateData = &map[string]interface{}{
@@ -103,14 +106,13 @@ echo -n $@ &> {{.OutputFile}}
 	tObj := template.Must(template.New("test").Parse(execScriptTempl))
 	buf := &bytes.Buffer{}
 	if err := tObj.Execute(buf, *execTemplateData); err != nil {
-		t.Errorf("Error in executing script template - %v", err)
+		t.Errorf("Error in executing script template: %v", err)
 	}
 	execScript := buf.String()
 	_, err = f.WriteString(execScript)
 	if err != nil {
-		t.Errorf("Failed to write plugin exec")
+		t.Errorf("Failed to write plugin %q: %v", pluginExec, err)
 	}
-	f.Close()
 }
 
 func tearDownPlugin(testPluginPath string) {
@@ -131,7 +133,7 @@ func TestSelectPlugin(t *testing.T) {
 
 	installPluginUnderTest(t, "", testPluginPath, pluginName, nil)
 
-	plug, err := network.InitNetworkPlugin(ProbeNetworkPlugins(testPluginPath), pluginName, network.NewFakeHost(nil))
+	plug, err := network.InitNetworkPlugin(ProbeNetworkPlugins(testPluginPath), pluginName, nettest.NewFakeHost(nil))
 	if err != nil {
 		t.Errorf("Failed to select the desired plugin: %v", err)
 	}
@@ -153,7 +155,7 @@ func TestSelectVendoredPlugin(t *testing.T) {
 	installPluginUnderTest(t, vendor, testPluginPath, pluginName, nil)
 
 	vendoredPluginName := fmt.Sprintf("%s/%s", vendor, pluginName)
-	plug, err := network.InitNetworkPlugin(ProbeNetworkPlugins(testPluginPath), vendoredPluginName, network.NewFakeHost(nil))
+	plug, err := network.InitNetworkPlugin(ProbeNetworkPlugins(testPluginPath), vendoredPluginName, nettest.NewFakeHost(nil))
 	if err != nil {
 		t.Errorf("Failed to select the desired plugin: %v", err)
 	}
@@ -174,7 +176,7 @@ func TestSelectWrongPlugin(t *testing.T) {
 	installPluginUnderTest(t, "", testPluginPath, pluginName, nil)
 
 	wrongPlugin := "abcd"
-	plug, err := network.InitNetworkPlugin(ProbeNetworkPlugins(testPluginPath), wrongPlugin, network.NewFakeHost(nil))
+	plug, err := network.InitNetworkPlugin(ProbeNetworkPlugins(testPluginPath), wrongPlugin, nettest.NewFakeHost(nil))
 	if plug != nil || err == nil {
 		t.Errorf("Expected to see an error. Wrong plugin selected.")
 	}
@@ -202,7 +204,7 @@ func TestPluginValidation(t *testing.T) {
 	}
 	f.Close()
 
-	_, err = network.InitNetworkPlugin(ProbeNetworkPlugins(testPluginPath), pluginName, network.NewFakeHost(nil))
+	_, err = network.InitNetworkPlugin(ProbeNetworkPlugins(testPluginPath), pluginName, nettest.NewFakeHost(nil))
 	if err == nil {
 		// we expected an error here because validation would have failed
 		t.Errorf("Expected non-nil value.")
@@ -220,7 +222,7 @@ func TestPluginSetupHook(t *testing.T) {
 
 	installPluginUnderTest(t, "", testPluginPath, pluginName, nil)
 
-	plug, err := network.InitNetworkPlugin(ProbeNetworkPlugins(testPluginPath), pluginName, network.NewFakeHost(nil))
+	plug, err := network.InitNetworkPlugin(ProbeNetworkPlugins(testPluginPath), pluginName, nettest.NewFakeHost(nil))
 
 	err = plug.SetUpPod("podNamespace", "podName", "dockerid2345")
 	if err != nil {
@@ -248,7 +250,7 @@ func TestPluginTearDownHook(t *testing.T) {
 
 	installPluginUnderTest(t, "", testPluginPath, pluginName, nil)
 
-	plug, err := network.InitNetworkPlugin(ProbeNetworkPlugins(testPluginPath), pluginName, network.NewFakeHost(nil))
+	plug, err := network.InitNetworkPlugin(ProbeNetworkPlugins(testPluginPath), pluginName, nettest.NewFakeHost(nil))
 
 	err = plug.TearDownPod("podNamespace", "podName", "dockerid2345")
 	if err != nil {
@@ -276,7 +278,7 @@ func TestPluginStatusHook(t *testing.T) {
 
 	installPluginUnderTest(t, "", testPluginPath, pluginName, nil)
 
-	plug, err := network.InitNetworkPlugin(ProbeNetworkPlugins(testPluginPath), pluginName, network.NewFakeHost(nil))
+	plug, err := network.InitNetworkPlugin(ProbeNetworkPlugins(testPluginPath), pluginName, nettest.NewFakeHost(nil))
 
 	ip, err := plug.Status("namespace", "name", "dockerid2345")
 	if err != nil {
@@ -312,20 +314,24 @@ func TestPluginStatusHookIPv6(t *testing.T) {
 	}
 	installPluginUnderTest(t, "", testPluginPath, pluginName, execTemplate)
 
-	plug, err := network.InitNetworkPlugin(ProbeNetworkPlugins(testPluginPath), pluginName, network.NewFakeHost(nil))
+	plug, err := network.InitNetworkPlugin(ProbeNetworkPlugins(testPluginPath), pluginName, nettest.NewFakeHost(nil))
+	if err != nil {
+		t.Errorf("InitNetworkPlugin() failed: %v", err)
+	}
 
 	ip, err := plug.Status("namespace", "name", "dockerid2345")
 	if err != nil {
-		t.Errorf("Expected nil got %v", err)
+		t.Errorf("Status() failed: %v", err)
 	}
 	// check output of status hook
-	output, err := ioutil.ReadFile(path.Join(testPluginPath, pluginName, pluginName+".out"))
+	outPath := path.Join(testPluginPath, pluginName, pluginName+".out")
+	output, err := ioutil.ReadFile(outPath)
 	if err != nil {
-		t.Errorf("Expected nil")
+		t.Errorf("ReadFile(%q) failed: %v", outPath, err)
 	}
 	expectedOutput := "status namespace name dockerid2345"
 	if string(output) != expectedOutput {
-		t.Errorf("Mismatch in expected output for status hook. Expected '%s', got '%s'", expectedOutput, string(output))
+		t.Errorf("Mismatch in expected output for status hook. Expected %q, got %q", expectedOutput, string(output))
 	}
 	if ip.IP.String() != "fe80::e2cb:4eff:fef9:6710" {
 		t.Errorf("Mismatch in expected output for status hook. Expected 'fe80::e2cb:4eff:fef9:6710', got '%s'", ip.IP.String())

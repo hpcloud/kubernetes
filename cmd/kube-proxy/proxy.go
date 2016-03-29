@@ -22,8 +22,10 @@ import (
 	"runtime"
 
 	"k8s.io/kubernetes/cmd/kube-proxy/app"
+	"k8s.io/kubernetes/cmd/kube-proxy/app/options"
 	"k8s.io/kubernetes/pkg/healthz"
 	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/pkg/util/flag"
 	"k8s.io/kubernetes/pkg/version/verflag"
 
 	"github.com/spf13/pflag"
@@ -35,10 +37,10 @@ func init() {
 
 func main() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
-	config := app.NewProxyConfig()
+	config := options.NewProxyConfig()
 	config.AddFlags(pflag.CommandLine)
 
-	util.InitFlags()
+	flag.InitFlags()
 	util.InitLogs()
 	defer util.FlushLogs()
 
@@ -50,7 +52,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = s.Run(pflag.CommandLine.Args()); err != nil {
+	if err = s.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}

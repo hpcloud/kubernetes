@@ -30,6 +30,10 @@ JSON and YAML formats are accepted.
     Output mode. Use "\-o name" for shorter output (resource/name).
 
 .PP
+\fB\-\-record\fP=false
+    Record current kubectl command in the resource annotation.
+
+.PP
 \fB\-\-schema\-cache\-dir\fP="\~/.kube/schema"
     If non\-empty, load/store cached API schemas in this directory, default is '$HOME/.kube/schema'
 
@@ -45,7 +49,7 @@ JSON and YAML formats are accepted.
 
 .PP
 \fB\-\-api\-version\fP=""
-    The API version to use when talking to the server
+    DEPRECATED: The API version to use when talking to the server
 
 .PP
 \fB\-\-certificate\-authority\fP=""
@@ -138,10 +142,10 @@ JSON and YAML formats are accepted.
 
 .nf
 # Apply the configuration in pod.json to a pod.
-$ kubectl apply \-f ./pod.json
+kubectl apply \-f ./pod.json
 
 # Apply the JSON passed into stdin to a pod.
-$ cat pod.json | kubectl apply \-f \-
+cat pod.json | kubectl apply \-f \-
 
 .fi
 .RE

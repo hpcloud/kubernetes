@@ -4,9 +4,9 @@ metadata:
   name: frontend
   # these labels can be applied automatically
   # from the labels in the pod template if not set
-  labels:
-    app: guestbook
-    tier: frontend
+  # labels:
+    # app: guestbook
+    # tier: frontend
 spec:
   # this replicas value is default
   # modify it according to your case
@@ -24,7 +24,7 @@ spec:
     spec:
       containers:
       - name: php-redis
-        image: gcr.io/google_samples/gb-frontend:v3
+        image: gcr.io/google_samples/gb-frontend:v4
         resources:
           requests:
             cpu: 100m

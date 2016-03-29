@@ -18,9 +18,10 @@
 If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
+<!-- TAG RELEASE_LINK, added by the munger automatically -->
 <strong>
 The latest release of this document can be found
-[here](http://releases.k8s.io/release-1.1/docs/devel/api-conventions.md).
+[here](http://releases.k8s.io/release-1.2/docs/devel/api-conventions.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -52,6 +53,7 @@ using resources with kubectl can be found in [Working with resources](../user-gu
       - [Lists of named subobjects preferred over maps](#lists-of-named-subobjects-preferred-over-maps)
       - [Primitive types](#primitive-types)
       - [Constants](#constants)
+      - [Unions](#unions)
     - [Lists and Simple kinds](#lists-and-simple-kinds)
   - [Differing Representations](#differing-representations)
   - [Verbs on Resources](#verbs-on-resources)
@@ -76,6 +78,7 @@ using resources with kubectl can be found in [Working with resources](../user-gu
   - [Naming conventions](#naming-conventions)
   - [Label, selector, and annotation conventions](#label-selector-and-annotation-conventions)
   - [WebSockets and SPDY](#websockets-and-spdy)
+  - [Validation](#validation)
 
 <!-- END MUNGE: GENERATED_TOC -->
 
@@ -152,7 +155,7 @@ These fields are required for proper decoding of the object. They may be populat
 
 Every object kind MUST have the following metadata in a nested object field called "metadata":
 
-* namespace: a namespace is a DNS compatible subdomain that objects are subdivided into. The default namespace is 'default'.  See [docs/user-guide/namespaces.md](../user-guide/namespaces.md) for more.
+* namespace: a namespace is a DNS compatible label that objects are subdivided into. The default namespace is 'default'.  See [docs/user-guide/namespaces.md](../user-guide/namespaces.md) for more.
 * name: a string that uniquely identifies this object within the current namespace (see [docs/user-guide/identifiers.md](../user-guide/identifiers.md)). This value is used in the path when retrieving an individual object.
 * uid: a unique in time and space value (typically an RFC 4122 generated identifier, see [docs/user-guide/identifiers.md](../user-guide/identifiers.md)) used to distinguish between objects with the same name that have been deleted and recreated
 
@@ -255,10 +258,20 @@ This rule maintains the invariant that all JSON/YAML keys are fields in API obje
 * Do not use unsigned integers, due to inconsistent support across languages and libraries. Just validate that the integer is non-negative if that's the case.
 * Do not use enums. Use aliases for string instead (e.g., `NodeConditionType`).
 * Look at similar fields in the API (e.g., ports, durations) and follow the conventions of existing fields.
+* All public integer fields MUST use the Go `(u)int32` or Go `(u)int64` types, not `(u)int` (which is ambiguous depending on target platform). Internal types may use `(u)int`.
 
 #### Constants
 
 Some fields will have a list of allowed values (enumerations). These values will be strings, and they will be in CamelCase, with an initial uppercase letter. Examples: "ClusterFirst", "Pending", "ClientIP".
+
+#### Unions
+
+Sometimes, at most one of a set of fields can be set.  For example, the [volumes] field of a PodSpec has 17 different volume type-specific
+fields, such as `nfs` and `iscsi`.  All fields in the set should be [Optional](#optional-vs-required).
+
+Sometimes, when a new type is created, the api designer may anticipate that a union will be needed in the future, even if only one field is
+allowed initially.  In this case, be sure to make the field [Optional](#optional-vs-required) optional.  In the validation, you may
+still return an error if the sole field is unset.  Do not set a default value for that field.
 
 ### Lists and Simple kinds
 
@@ -401,7 +414,7 @@ Using the `omitempty` tag causes swagger documentation to reflect that the field
 
 Using a pointer allows distinguishing unset from the zero value for that type.
 There are some cases where, in principle, a pointer is not needed for an optional field
-since the zero value is forbidden, and thus imples unset.   There are examples of this in the
+since the zero value is forbidden, and thus implies unset.   There are examples of this in the
 codebase.  However:
 
 - it can be difficult for implementors to anticipate all cases where an empty value might need to be
@@ -786,6 +799,35 @@ There are two primary protocols in use today:
 
 Clients should use the SPDY protocols if their clients have native support, or WebSockets as a fallback. Note that WebSockets is susceptible to Head-of-Line blocking and so clients must read and process each message sequentionally. In the future, an HTTP/2 implementation will be exposed that deprecates SPDY.
 
+
+## Validation
+
+API objects are validated upon receipt by the apiserver.  Validation errors are
+flagged and returned to the caller in a `Failure` status with `reason` set to
+`Invalid`.  In order to facilitate consistent error messages, we ask that
+validation logic adheres to the following guidelines whenever possible (though
+exceptional cases will exist).
+
+* Be as precise as possible.
+* Telling users what they CAN do is more useful than telling them what they
+  CANNOT do.
+* When asserting a requirement in the positive, use "must".  Examples: "must be
+  greater than 0", "must match regex '[a-z]+'".  Words like "should" imply that
+  the assertion is optional, and must be avoided.
+* When asserting a formatting requirement in the negative, use "must not".
+  Example: "must not contain '..'".  Words like "should not" imply that the
+  assertion is optional, and must be avoided.
+* When asserting a behavioral requirement in the negative, use "may not".
+  Examples: "may not be specified when otherField is empty", "only `name` may be
+  specified".
+* When referencing a literal string value, indicate the literal in
+  single-quotes. Example: "must not contain '..'".
+* When referencing another field name, indicate the name in back-quotes.
+  Example: "must be greater than `request`".
+* When specifying inequalities, use words rather than symbols.  Examples: "must
+  be less than 256", "must be greater than or equal to 0".  Do not use words
+  like "larger than", "bigger than", "more than", "higher than", etc.
+* When specifying numeric ranges, use inclusive ranges when possible.
 
 <!-- BEGIN MUNGE: GENERATED_ANALYTICS -->
 [![Analytics](https://kubernetes-site.appspot.com/UA-36037335-10/GitHub/docs/devel/api-conventions.md?pixel)]()

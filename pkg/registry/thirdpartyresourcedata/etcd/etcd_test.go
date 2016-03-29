@@ -32,8 +32,9 @@ import (
 )
 
 func newStorage(t *testing.T) (*REST, *etcdtesting.EtcdTestServer) {
-	etcdStorage, server := registrytest.NewEtcdStorage(t, "extensions")
-	return NewREST(etcdStorage, generic.UndecoratedStorage, "foo", "bar"), server
+	etcdStorage, server := registrytest.NewEtcdStorage(t, extensions.GroupName)
+	restOptions := generic.RESTOptions{Storage: etcdStorage, Decorator: generic.UndecoratedStorage, DeleteCollectionWorkers: 1}
+	return NewREST(restOptions, "foo", "bar"), server
 }
 
 func validNewThirdPartyResourceData(name string) *extensions.ThirdPartyResourceData {

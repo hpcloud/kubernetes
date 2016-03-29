@@ -23,13 +23,14 @@ import (
 
 	"github.com/golang/glog"
 	"k8s.io/kubernetes/pkg/api"
-	client "k8s.io/kubernetes/pkg/client/unversioned"
+	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 	"k8s.io/kubernetes/pkg/cloudprovider"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/types"
 	"k8s.io/kubernetes/pkg/util"
 	"k8s.io/kubernetes/pkg/util/io"
 	"k8s.io/kubernetes/pkg/util/mount"
+	"k8s.io/kubernetes/pkg/util/strings"
 	"k8s.io/kubernetes/pkg/volume"
 )
 
@@ -53,20 +54,32 @@ func (vh *volumeHost) GetPodPluginDir(podUID types.UID, pluginName string) strin
 	return vh.kubelet.getPodPluginDir(podUID, pluginName)
 }
 
-func (vh *volumeHost) GetKubeClient() client.Interface {
+func (vh *volumeHost) GetKubeClient() clientset.Interface {
 	return vh.kubelet.kubeClient
 }
 
-func (vh *volumeHost) NewWrapperBuilder(spec *volume.Spec, pod *api.Pod, opts volume.VolumeOptions) (volume.Builder, error) {
-	b, err := vh.kubelet.newVolumeBuilderFromPlugins(spec, pod, opts)
+func (vh *volumeHost) NewWrapperMounter(volName string, spec volume.Spec, pod *api.Pod, opts volume.VolumeOptions) (volume.Mounter, error) {
+	// The name of wrapper volume is set to "wrapped_{wrapped_volume_name}"
+	wrapperVolumeName := "wrapped_" + volName
+	if spec.Volume != nil {
+		spec.Volume.Name = wrapperVolumeName
+	}
+
+	b, err := vh.kubelet.newVolumeMounterFromPlugins(&spec, pod, opts)
 	if err == nil && b == nil {
 		return nil, errUnsupportedVolumeType
 	}
 	return b, nil
 }
 
-func (vh *volumeHost) NewWrapperCleaner(spec *volume.Spec, podUID types.UID) (volume.Cleaner, error) {
-	plugin, err := vh.kubelet.volumePluginMgr.FindPluginBySpec(spec)
+func (vh *volumeHost) NewWrapperUnmounter(volName string, spec volume.Spec, podUID types.UID) (volume.Unmounter, error) {
+	// The name of wrapper volume is set to "wrapped_{wrapped_volume_name}"
+	wrapperVolumeName := "wrapped_" + volName
+	if spec.Volume != nil {
+		spec.Volume.Name = wrapperVolumeName
+	}
+
+	plugin, err := vh.kubelet.volumePluginMgr.FindPluginBySpec(&spec)
 	if err != nil {
 		return nil, err
 	}
@@ -74,7 +87,7 @@ func (vh *volumeHost) NewWrapperCleaner(spec *volume.Spec, podUID types.UID) (vo
 		// Not found but not an error
 		return nil, nil
 	}
-	c, err := plugin.NewCleaner(spec.Name(), podUID)
+	c, err := plugin.NewUnmounter(spec.Name(), podUID)
 	if err == nil && c == nil {
 		return nil, errUnsupportedVolumeType
 	}
@@ -98,32 +111,13 @@ func (vh *volumeHost) GetHostName() string {
 	return vh.kubelet.hostname
 }
 
-func (kl *Kubelet) newVolumeBuilderFromPlugins(spec *volume.Spec, pod *api.Pod, opts volume.VolumeOptions) (volume.Builder, error) {
-	plugin, err := kl.volumePluginMgr.FindPluginBySpec(spec)
-	if err != nil {
-		return nil, fmt.Errorf("can't use volume plugins for %s: %v", spec.Name(), err)
-	}
-	if plugin == nil {
-		// Not found but not an error
-		return nil, nil
-	}
-	builder, err := plugin.NewBuilder(spec, pod, opts)
-	if err != nil {
-		return nil, fmt.Errorf("failed to instantiate volume plugin for %s: %v", spec.Name(), err)
-	}
-	glog.V(3).Infof("Used volume plugin %q for %s", plugin.Name(), spec.Name())
-	return builder, nil
-}
-
 func (kl *Kubelet) mountExternalVolumes(pod *api.Pod) (kubecontainer.VolumeMap, error) {
 	podVolumes := make(kubecontainer.VolumeMap)
 	for i := range pod.Spec.Volumes {
 		volSpec := &pod.Spec.Volumes[i]
-		hasFSGroup := false
-		var fsGroup int64 = 0
+		var fsGroup *int64
 		if pod.Spec.SecurityContext != nil && pod.Spec.SecurityContext.FSGroup != nil {
-			hasFSGroup = true
-			fsGroup = *pod.Spec.SecurityContext.FSGroup
+			fsGroup = pod.Spec.SecurityContext.FSGroup
 		}
 
 		rootContext, err := kl.getRootDirContext()
@@ -133,30 +127,35 @@ func (kl *Kubelet) mountExternalVolumes(pod *api.Pod) (kubecontainer.VolumeMap, 
 
 		// Try to use a plugin for this volume.
 		internal := volume.NewSpecFromVolume(volSpec)
-		builder, err := kl.newVolumeBuilderFromPlugins(internal, pod, volume.VolumeOptions{RootContext: rootContext})
+		mounter, err := kl.newVolumeMounterFromPlugins(internal, pod, volume.VolumeOptions{RootContext: rootContext})
 		if err != nil {
-			glog.Errorf("Could not create volume builder for pod %s: %v", pod.UID, err)
+			glog.Errorf("Could not create volume mounter for pod %s: %v", pod.UID, err)
 			return nil, err
 		}
-		if builder == nil {
+		if mounter == nil {
 			return nil, errUnsupportedVolumeType
 		}
-		err = builder.SetUp()
+
+		// some volumes require attachment before mounter's setup.
+		// The plugin can be nil, but non-nil errors are legitimate errors.
+		// For non-nil plugins, Attachment to a node is required before Mounter's setup.
+		attacher, err := kl.newVolumeAttacherFromPlugins(internal, pod, volume.VolumeOptions{RootContext: rootContext})
+		if err != nil {
+			glog.Errorf("Could not create volume attacher for pod %s: %v", pod.UID, err)
+			return nil, err
+		}
+		if attacher != nil {
+			err = attacher.Attach()
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		err = mounter.SetUp(fsGroup)
 		if err != nil {
 			return nil, err
 		}
-		if hasFSGroup &&
-			builder.GetAttributes().Managed &&
-			builder.GetAttributes().SupportsOwnershipManagement {
-			err := kl.manageVolumeOwnership(pod, internal, builder, fsGroup)
-			if err != nil {
-				glog.Errorf("Error managing ownership of volume %v for pod %v/%v: %v", internal.Name(), pod.Namespace, pod.Name, err)
-				return nil, err
-			} else {
-				glog.V(3).Infof("Managed ownership of volume %v for pod %v/%v", internal.Name(), pod.Namespace, pod.Name)
-			}
-		}
-		podVolumes[volSpec.Name] = kubecontainer.VolumeInfo{Builder: builder}
+		podVolumes[volSpec.Name] = kubecontainer.VolumeInfo{Mounter: mounter}
 	}
 	return podVolumes, nil
 }
@@ -164,6 +163,19 @@ func (kl *Kubelet) mountExternalVolumes(pod *api.Pod) (kubecontainer.VolumeMap, 
 type volumeTuple struct {
 	Kind string
 	Name string
+}
+
+// ListVolumesForPod returns a map of the volumes associated with the given pod
+func (kl *Kubelet) ListVolumesForPod(podUID types.UID) (map[string]volume.Volume, bool) {
+	result := map[string]volume.Volume{}
+	vm, ok := kl.volumeManager.GetVolumes(podUID)
+	if !ok {
+		return result, false
+	}
+	for name, info := range vm {
+		result[name] = info.Mounter
+	}
+	return result, true
 }
 
 func (kl *Kubelet) getPodVolumes(podUID types.UID) ([]*volumeTuple, error) {
@@ -193,14 +205,22 @@ func (kl *Kubelet) getPodVolumes(podUID types.UID) ([]*volumeTuple, error) {
 	return volumes, nil
 }
 
+// cleanerTuple is a union struct to allow separating detaching from the cleaner.
+// some volumes require detachment but not all.  Unmounter cannot be nil but Detacher is optional.
+type cleanerTuple struct {
+	Unmounter volume.Unmounter
+	Detacher  *volume.Detacher
+}
+
 // getPodVolumesFromDisk examines directory structure to determine volumes that
-// are presently active and mounted. Returns a map of volume.Cleaner types.
-func (kl *Kubelet) getPodVolumesFromDisk() map[string]volume.Cleaner {
-	currentVolumes := make(map[string]volume.Cleaner)
+// are presently active and mounted. Returns a union struct containing a volume.Unmounter
+// and potentially a volume.Detacher.
+func (kl *Kubelet) getPodVolumesFromDisk() map[string]cleanerTuple {
+	currentVolumes := make(map[string]cleanerTuple)
 	podUIDs, err := kl.listPodsFromDisk()
 	if err != nil {
 		glog.Errorf("Could not get pods from disk: %v", err)
-		return map[string]volume.Cleaner{}
+		return map[string]cleanerTuple{}
 	}
 	// Find the volumes for each on-disk pod.
 	for _, podUID := range podUIDs {
@@ -211,29 +231,75 @@ func (kl *Kubelet) getPodVolumesFromDisk() map[string]volume.Cleaner {
 		}
 		for _, volume := range volumes {
 			identifier := fmt.Sprintf("%s/%s", podUID, volume.Name)
-			glog.V(4).Infof("Making a volume.Cleaner for volume %s/%s of pod %s", volume.Kind, volume.Name, podUID)
+			glog.V(4).Infof("Making a volume.Unmounter for volume %s/%s of pod %s", volume.Kind, volume.Name, podUID)
 			// TODO(thockin) This should instead return a reference to an extant
 			// volume object, except that we don't actually hold on to pod specs
 			// or volume objects.
 
 			// Try to use a plugin for this volume.
-			cleaner, err := kl.newVolumeCleanerFromPlugins(volume.Kind, volume.Name, podUID)
+			unmounter, err := kl.newVolumeUnmounterFromPlugins(volume.Kind, volume.Name, podUID)
 			if err != nil {
-				glog.Errorf("Could not create volume cleaner for %s: %v", volume.Name, err)
+				glog.Errorf("Could not create volume unmounter for %s: %v", volume.Name, err)
 				continue
 			}
-			if cleaner == nil {
-				glog.Errorf("Could not create volume cleaner for %s: %v", volume.Name, errUnsupportedVolumeType)
+			if unmounter == nil {
+				glog.Errorf("Could not create volume unmounter for %s: %v", volume.Name, errUnsupportedVolumeType)
 				continue
 			}
-			currentVolumes[identifier] = cleaner
+
+			tuple := cleanerTuple{Unmounter: unmounter}
+			detacher, err := kl.newVolumeDetacherFromPlugins(volume.Kind, volume.Name, podUID)
+			// plugin can be nil but a non-nil error is a legitimate error
+			if err != nil {
+				glog.Errorf("Could not create volume detacher for %s: %v", volume.Name, err)
+				continue
+			}
+			if detacher != nil {
+				tuple.Detacher = &detacher
+			}
+			currentVolumes[identifier] = tuple
 		}
 	}
 	return currentVolumes
 }
 
-func (kl *Kubelet) newVolumeCleanerFromPlugins(kind string, name string, podUID types.UID) (volume.Cleaner, error) {
-	plugName := util.UnescapeQualifiedNameForDisk(kind)
+func (kl *Kubelet) newVolumeMounterFromPlugins(spec *volume.Spec, pod *api.Pod, opts volume.VolumeOptions) (volume.Mounter, error) {
+	plugin, err := kl.volumePluginMgr.FindPluginBySpec(spec)
+	if err != nil {
+		return nil, fmt.Errorf("can't use volume plugins for %s: %v", spec.Name(), err)
+	}
+	if plugin == nil {
+		// Not found but not an error
+		return nil, nil
+	}
+	physicalMounter, err := plugin.NewMounter(spec, pod, opts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to instantiate volume physicalMounter for %s: %v", spec.Name(), err)
+	}
+	glog.V(10).Infof("Used volume plugin %q to mount %s", plugin.Name(), spec.Name())
+	return physicalMounter, nil
+}
+
+func (kl *Kubelet) newVolumeAttacherFromPlugins(spec *volume.Spec, pod *api.Pod, opts volume.VolumeOptions) (volume.Attacher, error) {
+	plugin, err := kl.volumePluginMgr.FindAttachablePluginBySpec(spec)
+	if err != nil {
+		return nil, fmt.Errorf("can't use volume plugins for %s: %v", spec.Name(), err)
+	}
+	if plugin == nil {
+		// Not found but not an error.
+		return nil, nil
+	}
+
+	attacher, err := plugin.NewAttacher(spec)
+	if err != nil {
+		return nil, fmt.Errorf("failed to instantiate volume attacher for %s: %v", spec.Name(), err)
+	}
+	glog.V(3).Infof("Used volume plugin %q to attach %s/%s", plugin.Name(), spec.Name())
+	return attacher, nil
+}
+
+func (kl *Kubelet) newVolumeUnmounterFromPlugins(kind string, name string, podUID types.UID) (volume.Unmounter, error) {
+	plugName := strings.UnescapeQualifiedNameForDisk(kind)
 	plugin, err := kl.volumePluginMgr.FindPluginByName(plugName)
 	if err != nil {
 		// TODO: Maybe we should launch a cleanup of this dir?
@@ -243,10 +309,29 @@ func (kl *Kubelet) newVolumeCleanerFromPlugins(kind string, name string, podUID 
 		// Not found but not an error.
 		return nil, nil
 	}
-	cleaner, err := plugin.NewCleaner(name, podUID)
+	unmounter, err := plugin.NewUnmounter(name, podUID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to instantiate volume plugin for %s/%s: %v", podUID, kind, err)
 	}
-	glog.V(3).Infof("Used volume plugin %q for %s/%s", plugin.Name(), podUID, kind)
-	return cleaner, nil
+	glog.V(5).Infof("Used volume plugin %q to unmount %s/%s", plugin.Name(), podUID, kind)
+	return unmounter, nil
+}
+
+func (kl *Kubelet) newVolumeDetacherFromPlugins(kind string, name string, podUID types.UID) (volume.Detacher, error) {
+	plugName := strings.UnescapeQualifiedNameForDisk(kind)
+	plugin, err := kl.volumePluginMgr.FindAttachablePluginByName(plugName)
+	if err != nil {
+		return nil, fmt.Errorf("can't use volume plugins for %s/%s: %v", podUID, kind, err)
+	}
+	if plugin == nil {
+		// Not found but not an error.
+		return nil, nil
+	}
+
+	detacher, err := plugin.NewDetacher(name, podUID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to instantiate volume plugin for %s/%s: %v", podUID, kind, err)
+	}
+	glog.V(3).Infof("Used volume plugin %q to detach %s/%s", plugin.Name(), podUID, kind)
+	return detacher, nil
 }

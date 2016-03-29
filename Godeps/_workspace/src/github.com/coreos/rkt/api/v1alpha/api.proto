@@ -21,8 +21,6 @@
 //   The API defined here is proposed, experimental,   //
 //   and (for now) subject to change at any time.      //
 //                                                     //
-//                   Do not use it.                    //
-//                                                     //
 //  If you think you want to use it, or for any other  //
 //     queries, contact <rkt-dev@googlegroups.com>     //
 //      or file an issue on github.com/coreos/rkt      //
@@ -73,6 +71,12 @@ message Image {
 
         // JSON-encoded byte array that represents the image manifest, optional.
         bytes manifest = 6;
+
+        // Size is the size in bytes of this image in the store.
+        int64 size = 7;
+
+        // Annotations on this image.
+        repeated KeyValue annotations = 8;
 }
 
 // Network describes the network information of a pod.
@@ -109,6 +113,9 @@ message App {
         // Exit code of the app. optional, only valid if it's returned by InspectPod() and
         // the app has already exited.
         sint32 exit_code = 4;
+
+	// Annotations for this app.
+        repeated KeyValue annotations = 5;
 }
 
 // PodState defines the possible states of the pod.
@@ -133,25 +140,38 @@ enum PodState {
 }
 
 // Pod describes a pod's information.
+// If a pod is in Embryo, Preparing, AbortedPrepare state,
+// only id and state will be returned.
+//
+// If a pod is in other states, the pod manifest and
+// apps will be returned when 'detailed' is true in the request.
+//
+// A valid pid of the stage1 process of the pod will be returned
+// if the pod is Running has run once.
+//
+// Networks are only returned when a pod is in Running.
 message Pod {
-        // ID of the pod, in the form of a UUID, required.
+        // ID of the pod, in the form of a UUID.
         string id = 1;
 
-        // PID of the pod, optional, only valid if it's returned by InspectPod(). A negative value means the pod has exited.
+        // PID of the stage1 process of the pod.
         sint32 pid = 2;
 
-        // State of the pod, required.
+        // State of the pod.
         PodState state = 3;
 
-        // List of apps in the pod, required.
+        // List of apps in the pod.
         repeated App apps = 4;
 
-        // Network information of the pod, optional, non-empty if the pod is running in private net.
+        // Network information of the pod.
         // Note that a pod can be in multiple networks.
         repeated Network networks = 5;
 
-        // JSON-encoded byte array that represents the pod manifest of the pod, required.
+        // JSON-encoded byte array that represents the pod manifest of the pod.
         bytes manifest = 6;
+
+        // Annotations on this pod.
+        repeated KeyValue annotations = 7;
 }
 
 message KeyValue {
@@ -162,7 +182,7 @@ message KeyValue {
 }
 
 // PodFilter defines the condition that the returned pods need to satisfy in ListPods().
-// The conditions are combined by 'AND'.
+// The conditions are combined by 'AND', and different filters are combined by 'OR'.
 message PodFilter {
         // If not empty, the pods that have any of the ids will be returned.
         repeated string ids = 1;
@@ -170,21 +190,21 @@ message PodFilter {
         // If not empty, the pods that have any of the states will be returned.
         repeated PodState states = 2;
 
-        // If not empty, the pods that have any of the apps will be returned.
+        // If not empty, the pods that all of the apps will be returned.
         repeated string app_names = 3;
 
-        // If not empty, the pods that have any of the images(in the apps) will be returned
+        // If not empty, the pods that have all of the images(in the apps) will be returned
         repeated string image_ids = 4;
 
-        // If not empty, the pods that are in any of the networks will be returned.
+        // If not empty, the pods that are in all of the networks will be returned.
         repeated string network_names = 5;
 
-        // If not empty, the pods that have any of the annotations will be returned.
+        // If not empty, the pods that have all of the annotations will be returned.
         repeated KeyValue annotations = 6;
 }
 
 // ImageFilter defines the condition that the returned images need to satisfy in ListImages().
-// The conditions are combined by 'AND'.
+// The conditions are combined by 'AND', and different filters are combined by 'OR'.
 message ImageFilter {
         // If not empty, the images that have any of the ids will be returned.
         repeated string ids = 1;
@@ -201,7 +221,7 @@ message ImageFilter {
         // For example, both 'kubernetes-etcd', 'etcd:latest' will be returned if 'etcd' is included,
         repeated string keywords = 4;
 
-        // If not empty, the images that have any of the labels will be returned.
+        // If not empty, the images that have all of the labels will be returned.
         repeated KeyValue labels = 5;
 
         // If set, the images that are imported after this timestamp will be returned.
@@ -210,8 +230,11 @@ message ImageFilter {
         // If set, the images that are imported before this timestamp will be returned.
         int64 imported_before = 7;
 
-        // If not empty, the images that have any of the annotations will be returned.
+        // If not empty, the images that have all of the annotations will be returned.
         repeated KeyValue annotations = 8;
+
+        // If not empty, the images that have any of the exact full names will be returned.
+        repeated string full_names = 9;
 }
 
 // Info describes the information of rkt on the machine.
@@ -291,7 +314,6 @@ message EventFilter {
         int64 until_time = 5;
 }
 
-
 // Request for GetInfo().
 message GetInfoRequest {}
 
@@ -302,7 +324,8 @@ message GetInfoResponse {
 
 // Request for ListPods().
 message ListPodsRequest {
-        PodFilter filter = 1; // Optional.
+        repeated PodFilter filters = 1; // Optional.
+        bool detail = 2; // Optional.
 }
 
 // Response for ListPods().
@@ -323,7 +346,8 @@ message InspectPodResponse {
 
 // Request for ListImages().
 message ListImagesRequest {
-        ImageFilter filter = 1; // Optional.
+        repeated ImageFilter filters = 1; // Optional.
+        bool detail = 2; // Optional.
 }
 
 // Response for ListImages().

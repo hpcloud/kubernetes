@@ -24,9 +24,8 @@ import (
 	"k8s.io/kubernetes/pkg/api"
 	apierrs "k8s.io/kubernetes/pkg/api/errors"
 	"k8s.io/kubernetes/pkg/api/meta"
-	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/client/cache"
-	client "k8s.io/kubernetes/pkg/client/unversioned"
+	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 	"k8s.io/kubernetes/pkg/controller/framework"
 	"k8s.io/kubernetes/pkg/fields"
 	"k8s.io/kubernetes/pkg/runtime"
@@ -39,7 +38,7 @@ func nameIndexFunc(obj interface{}) ([]string, error) {
 	if err != nil {
 		return []string{""}, fmt.Errorf("object has no meta: %v", err)
 	}
-	return []string{meta.Name()}, nil
+	return []string{meta.GetName()}, nil
 }
 
 // ServiceAccountsControllerOptions contains options for running a ServiceAccountsController
@@ -67,7 +66,7 @@ func DefaultServiceAccountsControllerOptions() ServiceAccountsControllerOptions 
 }
 
 // NewServiceAccountsController returns a new *ServiceAccountsController.
-func NewServiceAccountsController(cl client.Interface, options ServiceAccountsControllerOptions) *ServiceAccountsController {
+func NewServiceAccountsController(cl clientset.Interface, options ServiceAccountsControllerOptions) *ServiceAccountsController {
 	e := &ServiceAccountsController{
 		client:                  cl,
 		serviceAccountsToEnsure: options.ServiceAccounts,
@@ -76,17 +75,17 @@ func NewServiceAccountsController(cl client.Interface, options ServiceAccountsCo
 	accountSelector := fields.Everything()
 	if len(options.ServiceAccounts) == 1 {
 		// If we're maintaining a single account, we can scope the accounts we watch to just that name
-		accountSelector = fields.SelectorFromSet(map[string]string{client.ObjectNameField: options.ServiceAccounts[0].Name})
+		accountSelector = fields.SelectorFromSet(map[string]string{api.ObjectNameField: options.ServiceAccounts[0].Name})
 	}
 	e.serviceAccounts, e.serviceAccountController = framework.NewIndexerInformer(
 		&cache.ListWatch{
-			ListFunc: func() (runtime.Object, error) {
-				options := unversioned.ListOptions{FieldSelector: unversioned.FieldSelector{accountSelector}}
-				return e.client.ServiceAccounts(api.NamespaceAll).List(options)
+			ListFunc: func(options api.ListOptions) (runtime.Object, error) {
+				options.FieldSelector = accountSelector
+				return e.client.Core().ServiceAccounts(api.NamespaceAll).List(options)
 			},
-			WatchFunc: func(options unversioned.ListOptions) (watch.Interface, error) {
-				options.FieldSelector.Selector = accountSelector
-				return e.client.ServiceAccounts(api.NamespaceAll).Watch(options)
+			WatchFunc: func(options api.ListOptions) (watch.Interface, error) {
+				options.FieldSelector = accountSelector
+				return e.client.Core().ServiceAccounts(api.NamespaceAll).Watch(options)
 			},
 		},
 		&api.ServiceAccount{},
@@ -99,11 +98,11 @@ func NewServiceAccountsController(cl client.Interface, options ServiceAccountsCo
 
 	e.namespaces, e.namespaceController = framework.NewIndexerInformer(
 		&cache.ListWatch{
-			ListFunc: func() (runtime.Object, error) {
-				return e.client.Namespaces().List(unversioned.ListOptions{})
+			ListFunc: func(options api.ListOptions) (runtime.Object, error) {
+				return e.client.Core().Namespaces().List(options)
 			},
-			WatchFunc: func(options unversioned.ListOptions) (watch.Interface, error) {
-				return e.client.Namespaces().Watch(options)
+			WatchFunc: func(options api.ListOptions) (watch.Interface, error) {
+				return e.client.Core().Namespaces().Watch(options)
 			},
 		},
 		&api.Namespace{},
@@ -122,7 +121,7 @@ func NewServiceAccountsController(cl client.Interface, options ServiceAccountsCo
 type ServiceAccountsController struct {
 	stopChan chan struct{}
 
-	client                  client.Interface
+	client                  clientset.Interface
 	serviceAccountsToEnsure []api.ServiceAccount
 
 	serviceAccounts cache.Indexer
@@ -217,7 +216,7 @@ func (e *ServiceAccountsController) createServiceAccountIfNeeded(sa api.ServiceA
 // createDefaultServiceAccount creates a default ServiceAccount in the specified namespace
 func (e *ServiceAccountsController) createServiceAccount(sa api.ServiceAccount, namespace string) {
 	sa.Namespace = namespace
-	if _, err := e.client.ServiceAccounts(namespace).Create(&sa); err != nil && !apierrs.IsAlreadyExists(err) {
+	if _, err := e.client.Core().ServiceAccounts(namespace).Create(&sa); err != nil && !apierrs.IsAlreadyExists(err) {
 		glog.Error(err)
 	}
 }

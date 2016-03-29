@@ -76,7 +76,7 @@ func pipeLog(wg *sync.WaitGroup, logOptions *api.PodLogOptions, r io.ReadCloser,
 		var result string
 		if logOptions.Timestamps {
 			// Use the same time format as docker.
-			result = fmt.Sprintf("%s %s\n", t, msg)
+			result = fmt.Sprintf("%s %s\n", t.Format(time.RFC3339), msg)
 		} else {
 			result = fmt.Sprintf("%s\n", msg)
 		}
@@ -143,12 +143,12 @@ func (r *Runtime) GetContainerLogs(pod *api.Pod, containerID kubecontainer.Conta
 
 	outPipe, err := cmd.StdoutPipe()
 	if err != nil {
-		glog.Errorf("rkt: cannot create pipe for journalctl's stdout", err)
+		glog.Errorf("rkt: cannot create pipe for journalctl's stdout: %v", err)
 		return err
 	}
 	errPipe, err := cmd.StderrPipe()
 	if err != nil {
-		glog.Errorf("rkt: cannot create pipe for journalctl's stderr", err)
+		glog.Errorf("rkt: cannot create pipe for journalctl's stderr: %v", err)
 		return err
 	}
 

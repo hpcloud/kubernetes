@@ -18,6 +18,7 @@ package prober
 
 import (
 	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
@@ -26,12 +27,13 @@ import (
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/kubelet/prober/results"
 	"k8s.io/kubernetes/pkg/probe"
-	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/pkg/types"
+	"k8s.io/kubernetes/pkg/util/runtime"
 	"k8s.io/kubernetes/pkg/util/wait"
 )
 
 func init() {
-	util.ReallyCrash = true
+	runtime.ReallyCrash = true
 }
 
 var defaultProbe *api.Probe = &api.Probe{
@@ -78,6 +80,7 @@ func TestAddRemovePods(t *testing.T) {
 	}
 
 	m := newTestManager()
+	defer cleanup(t, m)
 	if err := expectProbes(m, nil); err != nil {
 		t.Error(err)
 	}
@@ -122,6 +125,7 @@ func TestAddRemovePods(t *testing.T) {
 
 func TestCleanupPods(t *testing.T) {
 	m := newTestManager()
+	defer cleanup(t, m)
 	podToCleanup := api.Pod{
 		ObjectMeta: api.ObjectMeta{
 			UID: "pod_cleanup",
@@ -171,6 +175,31 @@ func TestCleanupPods(t *testing.T) {
 	}
 }
 
+func TestCleanupRepeated(t *testing.T) {
+	m := newTestManager()
+	defer cleanup(t, m)
+	podTemplate := api.Pod{
+		Spec: api.PodSpec{
+			Containers: []api.Container{{
+				Name:           "prober1",
+				ReadinessProbe: defaultProbe,
+				LivenessProbe:  defaultProbe,
+			}},
+		},
+	}
+
+	const numTestPods = 100
+	for i := 0; i < numTestPods; i++ {
+		pod := podTemplate
+		pod.UID = types.UID(strconv.Itoa(i))
+		m.AddPod(&pod)
+	}
+
+	for i := 0; i < 10; i++ {
+		m.CleanupPods([]*api.Pod{})
+	}
+}
+
 func TestUpdatePodStatus(t *testing.T) {
 	unprobed := api.ContainerStatus{
 		Name:        "unprobed_container",
@@ -215,6 +244,8 @@ func TestUpdatePodStatus(t *testing.T) {
 	}
 
 	m := newTestManager()
+	// no cleanup: using fake workers.
+
 	// Setup probe "workers" and cached results.
 	m.workers = map[probeKey]*worker{
 		probeKey{testPodUID, unprobed.Name, liveness}:       {},
@@ -249,11 +280,27 @@ func TestUpdatePodStatus(t *testing.T) {
 }
 
 func TestUpdateReadiness(t *testing.T) {
-	testPod := getTestPod(readiness, api.Probe{})
+	testPod := getTestPod()
+	setTestProbe(testPod, readiness, api.Probe{})
 	m := newTestManager()
-	m.statusManager.SetPodStatus(&testPod, getTestRunningStatus())
+	defer cleanup(t, m)
 
-	m.AddPod(&testPod)
+	// Start syncing readiness without leaking goroutine.
+	stopCh := make(chan struct{})
+	go wait.Until(m.updateReadiness, 0, stopCh)
+	defer func() {
+		close(stopCh)
+		// Send an update to exit updateReadiness()
+		m.readinessManager.Set(kubecontainer.ContainerID{}, results.Success, &api.Pod{})
+	}()
+
+	exec := syncExecProber{}
+	exec.set(probe.Success, nil)
+	m.prober.exec = &exec
+
+	m.statusManager.SetPodStatus(testPod, getTestRunningStatus())
+
+	m.AddPod(testPod)
 	probePaths := []probeKey{{testPodUID, testContainerName, readiness}}
 	if err := expectProbes(m, probePaths); err != nil {
 		t.Error(err)
@@ -265,7 +312,7 @@ func TestUpdateReadiness(t *testing.T) {
 	}
 
 	// Prober fails.
-	m.prober.exec = fakeExecProber{probe.Failure, nil}
+	exec.set(probe.Failure, nil)
 
 	// Wait for failed status.
 	if err := waitForReadyStatus(m, false); err != nil {
@@ -299,7 +346,7 @@ outer:
 	return fmt.Errorf("Unexpected probes: %v; Missing probes: %v;", unexpected, missing)
 }
 
-const interval = 100 * time.Millisecond
+const interval = 1 * time.Second
 
 // Wait for the given workers to exit & clean up.
 func waitForWorkerExit(m *manager, workerPaths []probeKey) error {
@@ -312,7 +359,7 @@ func waitForWorkerExit(m *manager, workerPaths []probeKey) error {
 			continue // Already exited, no need to poll.
 		}
 		glog.Infof("Polling %v", w)
-		if err := wait.Poll(interval, util.ForeverTestTimeout, condition); err != nil {
+		if err := wait.Poll(interval, wait.ForeverTestTimeout, condition); err != nil {
 			return err
 		}
 	}
@@ -337,9 +384,28 @@ func waitForReadyStatus(m *manager, ready bool) error {
 		return status.ContainerStatuses[0].Ready == ready, nil
 	}
 	glog.Infof("Polling for ready state %v", ready)
-	if err := wait.Poll(interval, util.ForeverTestTimeout, condition); err != nil {
+	if err := wait.Poll(interval, wait.ForeverTestTimeout, condition); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+// cleanup running probes to avoid leaking goroutines.
+func cleanup(t *testing.T, m *manager) {
+	m.CleanupPods(nil)
+
+	condition := func() (bool, error) {
+		workerCount := m.workerCount()
+		if workerCount > 0 {
+			glog.Infof("Waiting for %d workers to exit...", workerCount)
+		}
+		return workerCount == 0, nil
+	}
+	if exited, _ := condition(); exited {
+		return // Already exited, no need to poll.
+	}
+	if err := wait.Poll(interval, wait.ForeverTestTimeout, condition); err != nil {
+		t.Fatalf("Error during cleanup: %v", err)
+	}
 }

@@ -23,9 +23,9 @@ import (
 	"path/filepath"
 
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/unversioned"
 	client "k8s.io/kubernetes/pkg/client/unversioned"
 	"k8s.io/kubernetes/pkg/labels"
+	"k8s.io/kubernetes/pkg/runtime"
 	"k8s.io/kubernetes/pkg/util/wait"
 	utilyaml "k8s.io/kubernetes/pkg/util/yaml"
 
@@ -38,7 +38,7 @@ func getLoadBalancerControllers(repoRoot string, client *client.Client) []LBCTes
 	return []LBCTester{
 		&haproxyControllerTester{
 			name:   "haproxy",
-			cfg:    filepath.Join(repoRoot, "test", "e2e", "testing-manifests", "haproxyrc.yaml"),
+			cfg:    filepath.Join(repoRoot, "test", "e2e", "testing-manifests", "serviceloadbalancer", "haproxyrc.yaml"),
 			client: client,
 		},
 	}
@@ -49,8 +49,8 @@ func getIngManagers(repoRoot string, client *client.Client) []*ingManager {
 	return []*ingManager{
 		{
 			name:        "netexec",
-			rcCfgPaths:  []string{filepath.Join(repoRoot, "test", "e2e", "testing-manifests", "netexecrc.yaml")},
-			svcCfgPaths: []string{filepath.Join(repoRoot, "test", "e2e", "testing-manifests", "netexecsvc.yaml")},
+			rcCfgPaths:  []string{filepath.Join(repoRoot, "test", "e2e", "testing-manifests", "serviceloadbalancer", "netexecrc.yaml")},
+			svcCfgPaths: []string{filepath.Join(repoRoot, "test", "e2e", "testing-manifests", "serviceloadbalancer", "netexecsvc.yaml")},
 			svcNames:    []string{},
 			client:      client,
 		},
@@ -111,7 +111,7 @@ func (h *haproxyControllerTester) start(namespace string) (err error) {
 	// Find the pods of the rc we just created.
 	labelSelector := labels.SelectorFromSet(
 		labels.Set(map[string]string{"name": h.rcName}))
-	options := unversioned.ListOptions{LabelSelector: unversioned.LabelSelector{labelSelector}}
+	options := api.ListOptions{LabelSelector: labelSelector}
 	pods, err := h.client.Pods(h.rcNamespace).List(options)
 	if err != nil {
 		return err
@@ -204,13 +204,13 @@ func (s *ingManager) test(path string) error {
 	})
 }
 
-var _ = Describe("ServiceLoadBalancer", func() {
+var _ = KubeDescribe("ServiceLoadBalancer [Feature:ServiceLoadBalancer]", func() {
 	// These variables are initialized after framework's beforeEach.
 	var ns string
 	var repoRoot string
 	var client *client.Client
 
-	framework := NewFramework("servicelb")
+	framework := NewDefaultFramework("servicelb")
 
 	BeforeEach(func() {
 		client = framework.Client
@@ -273,7 +273,7 @@ func rcFromManifest(fileName string) *api.ReplicationController {
 	json, err := utilyaml.ToJSON(data)
 	Expect(err).NotTo(HaveOccurred())
 
-	Expect(api.Scheme.DecodeInto(json, &controller)).NotTo(HaveOccurred())
+	Expect(runtime.DecodeInto(api.Codecs.UniversalDecoder(), json, &controller)).NotTo(HaveOccurred())
 	return &controller
 }
 
@@ -287,6 +287,6 @@ func svcFromManifest(fileName string) *api.Service {
 	json, err := utilyaml.ToJSON(data)
 	Expect(err).NotTo(HaveOccurred())
 
-	Expect(api.Scheme.DecodeInto(json, &svc)).NotTo(HaveOccurred())
+	Expect(runtime.DecodeInto(api.Codecs.UniversalDecoder(), json, &svc)).NotTo(HaveOccurred())
 	return &svc
 }

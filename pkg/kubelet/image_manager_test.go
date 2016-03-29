@@ -25,15 +25,17 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/kubernetes/pkg/client/record"
-	"k8s.io/kubernetes/pkg/kubelet/cadvisor"
+	cadvisortest "k8s.io/kubernetes/pkg/kubelet/cadvisor/testing"
 	"k8s.io/kubernetes/pkg/kubelet/container"
+	containertest "k8s.io/kubernetes/pkg/kubelet/container/testing"
+	"k8s.io/kubernetes/pkg/util"
 )
 
 var zero time.Time
 
-func newRealImageManager(policy ImageGCPolicy) (*realImageManager, *container.FakeRuntime, *cadvisor.Mock) {
-	fakeRuntime := &container.FakeRuntime{}
-	mockCadvisor := new(cadvisor.Mock)
+func newRealImageManager(policy ImageGCPolicy) (*realImageManager, *containertest.FakeRuntime, *cadvisortest.Mock) {
+	fakeRuntime := &containertest.FakeRuntime{}
+	mockCadvisor := new(cadvisortest.Mock)
 	return &realImageManager{
 		runtime:      fakeRuntime,
 		policy:       policy,
@@ -73,7 +75,7 @@ func makeImage(id int, size int64) container.Image {
 // Make a container with the specified ID. It will use the image with the same ID.
 func makeContainer(id int) *container.Container {
 	return &container.Container{
-		ID:    container.ContainerID{"test", fmt.Sprintf("container-%d", id)},
+		ID:    container.ContainerID{Type: "test", ID: fmt.Sprintf("container-%d", id)},
 		Image: imageName(id),
 	}
 }
@@ -99,11 +101,11 @@ func TestDetectImagesInitialDetect(t *testing.T) {
 	assert.Equal(manager.imageRecordsLen(), 2)
 	noContainer, ok := manager.getImageRecord(imageName(0))
 	require.True(t, ok)
-	assert.Equal(zero, noContainer.detected)
+	assert.Equal(zero, noContainer.firstDetected)
 	assert.Equal(zero, noContainer.lastUsed)
 	withContainer, ok := manager.getImageRecord(imageName(1))
 	require.True(t, ok)
-	assert.Equal(zero, withContainer.detected)
+	assert.Equal(zero, withContainer.firstDetected)
 	assert.True(withContainer.lastUsed.After(startTime))
 }
 
@@ -141,15 +143,15 @@ func TestDetectImagesWithNewImage(t *testing.T) {
 	assert.Equal(manager.imageRecordsLen(), 3)
 	noContainer, ok := manager.getImageRecord(imageName(0))
 	require.True(t, ok)
-	assert.Equal(zero, noContainer.detected)
+	assert.Equal(zero, noContainer.firstDetected)
 	assert.Equal(zero, noContainer.lastUsed)
 	withContainer, ok := manager.getImageRecord(imageName(1))
 	require.True(t, ok)
-	assert.Equal(zero, withContainer.detected)
+	assert.Equal(zero, withContainer.firstDetected)
 	assert.True(withContainer.lastUsed.After(startTime))
 	newContainer, ok := manager.getImageRecord(imageName(2))
 	require.True(t, ok)
-	assert.Equal(detectedTime, newContainer.detected)
+	assert.Equal(detectedTime, newContainer.firstDetected)
 	assert.Equal(zero, noContainer.lastUsed)
 }
 
@@ -181,11 +183,11 @@ func TestDetectImagesContainerStopped(t *testing.T) {
 	assert.Equal(manager.imageRecordsLen(), 2)
 	container1, ok := manager.getImageRecord(imageName(0))
 	require.True(t, ok)
-	assert.Equal(zero, container1.detected)
+	assert.Equal(zero, container1.firstDetected)
 	assert.Equal(zero, container1.lastUsed)
 	container2, ok := manager.getImageRecord(imageName(1))
 	require.True(t, ok)
-	assert.Equal(zero, container2.detected)
+	assert.Equal(zero, container2.firstDetected)
 	assert.True(container2.lastUsed.Equal(withContainer.lastUsed))
 }
 
@@ -229,7 +231,7 @@ func TestFreeSpaceImagesInUseContainersAreIgnored(t *testing.T) {
 		},
 	}
 
-	spaceFreed, err := manager.freeSpace(2048)
+	spaceFreed, err := manager.freeSpace(2048, time.Now())
 	assert := assert.New(t)
 	require.NoError(t, err)
 	assert.EqualValues(1024, spaceFreed)
@@ -269,7 +271,7 @@ func TestFreeSpaceRemoveByLeastRecentlyUsed(t *testing.T) {
 	require.NoError(t, manager.detectImages(time.Now()))
 	require.Equal(t, manager.imageRecordsLen(), 2)
 
-	spaceFreed, err := manager.freeSpace(1024)
+	spaceFreed, err := manager.freeSpace(1024, time.Now())
 	assert := assert.New(t)
 	require.NoError(t, err)
 	assert.EqualValues(1024, spaceFreed)
@@ -300,7 +302,7 @@ func TestFreeSpaceTiesBrokenByDetectedTime(t *testing.T) {
 	require.NoError(t, manager.detectImages(time.Now()))
 	require.Equal(t, manager.imageRecordsLen(), 2)
 
-	spaceFreed, err := manager.freeSpace(1024)
+	spaceFreed, err := manager.freeSpace(1024, time.Now())
 	assert := assert.New(t)
 	require.NoError(t, err)
 	assert.EqualValues(2048, spaceFreed)
@@ -312,23 +314,23 @@ func TestFreeSpaceImagesAlsoDoesLookupByRepoTags(t *testing.T) {
 	fakeRuntime.ImageList = []container.Image{
 		makeImage(0, 1024),
 		{
-			ID:   "5678",
-			Tags: []string{"potato", "salad"},
-			Size: 2048,
+			ID:       "5678",
+			RepoTags: []string{"potato", "salad"},
+			Size:     2048,
 		},
 	}
 	fakeRuntime.AllPodList = []*container.Pod{
 		{
 			Containers: []*container.Container{
 				{
-					ID:    container.ContainerID{"test", "c5678"},
+					ID:    container.ContainerID{Type: "test", ID: "c5678"},
 					Image: "salad",
 				},
 			},
 		},
 	}
 
-	spaceFreed, err := manager.freeSpace(1024)
+	spaceFreed, err := manager.freeSpace(1024, time.Now())
 	assert := assert.New(t)
 	require.NoError(t, err)
 	assert.EqualValues(1024, spaceFreed)
@@ -398,4 +400,52 @@ func TestGarbageCollectNotEnoughFreed(t *testing.T) {
 	}
 
 	assert.NotNil(t, manager.GarbageCollect())
+}
+
+func TestGarbageCollectImageNotOldEnough(t *testing.T) {
+	policy := ImageGCPolicy{
+		HighThresholdPercent: 90,
+		LowThresholdPercent:  80,
+		MinAge:               time.Minute * 1,
+	}
+	fakeRuntime := &containertest.FakeRuntime{}
+	mockCadvisor := new(cadvisortest.Mock)
+	manager := &realImageManager{
+		runtime:      fakeRuntime,
+		policy:       policy,
+		imageRecords: make(map[string]*imageRecord),
+		cadvisor:     mockCadvisor,
+		recorder:     &record.FakeRecorder{},
+	}
+
+	fakeRuntime.ImageList = []container.Image{
+		makeImage(0, 1024),
+		makeImage(1, 2048),
+	}
+	// 1 image is in use, and another one is not old enough
+	fakeRuntime.AllPodList = []*container.Pod{
+		{
+			Containers: []*container.Container{
+				makeContainer(1),
+			},
+		},
+	}
+
+	fakeClock := util.NewFakeClock(time.Now())
+	t.Log(fakeClock.Now())
+	require.NoError(t, manager.detectImages(fakeClock.Now()))
+	require.Equal(t, manager.imageRecordsLen(), 2)
+	// no space freed since one image is in used, and another one is not old enough
+	spaceFreed, err := manager.freeSpace(1024, fakeClock.Now())
+	assert := assert.New(t)
+	require.NoError(t, err)
+	assert.EqualValues(0, spaceFreed)
+	assert.Len(fakeRuntime.ImageList, 2)
+
+	// move clock by minAge duration, then 1 image will be garbage collected
+	fakeClock.Step(policy.MinAge)
+	spaceFreed, err = manager.freeSpace(1024, fakeClock.Now())
+	require.NoError(t, err)
+	assert.EqualValues(1024, spaceFreed)
+	assert.Len(fakeRuntime.ImageList, 1)
 }

@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"k8s.io/kubernetes/pkg/api"
@@ -32,8 +33,8 @@ import (
 	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/registry/generic"
 	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/util"
-	utilvalidation "k8s.io/kubernetes/pkg/util/validation"
+	utilnet "k8s.io/kubernetes/pkg/util/net"
+	"k8s.io/kubernetes/pkg/util/validation/field"
 )
 
 // podStrategy implements behavior for Pods
@@ -67,7 +68,7 @@ func (podStrategy) PrepareForUpdate(obj, old runtime.Object) {
 }
 
 // Validate validates a new pod.
-func (podStrategy) Validate(ctx api.Context, obj runtime.Object) utilvalidation.ErrorList {
+func (podStrategy) Validate(ctx api.Context, obj runtime.Object) field.ErrorList {
 	pod := obj.(*api.Pod)
 	return validation.ValidatePod(pod)
 }
@@ -82,7 +83,7 @@ func (podStrategy) AllowCreateOnUpdate() bool {
 }
 
 // ValidateUpdate is the default update validation for an end user.
-func (podStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) utilvalidation.ErrorList {
+func (podStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) field.ErrorList {
 	errorList := validation.ValidatePod(obj.(*api.Pod))
 	return append(errorList, validation.ValidatePodUpdate(obj.(*api.Pod), old.(*api.Pod))...)
 }
@@ -147,7 +148,7 @@ func (podStatusStrategy) PrepareForUpdate(obj, old runtime.Object) {
 	newPod.DeletionTimestamp = nil
 }
 
-func (podStatusStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) utilvalidation.ErrorList {
+func (podStatusStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) field.ErrorList {
 	// TODO: merge valid fields after update
 	return validation.ValidatePodStatusUpdate(obj.(*api.Pod), old.(*api.Pod))
 }
@@ -172,8 +173,9 @@ func MatchPod(label labels.Selector, field fields.Selector) generic.Matcher {
 func PodToSelectableFields(pod *api.Pod) fields.Set {
 	objectMetaFieldsSet := generic.ObjectMetaFieldsSet(pod.ObjectMeta, true)
 	podSpecificFieldsSet := fields.Set{
-		"spec.nodeName": pod.Spec.NodeName,
-		"status.phase":  string(pod.Status.Phase),
+		"spec.nodeName":      pod.Spec.NodeName,
+		"spec.restartPolicy": string(pod.Spec.RestartPolicy),
+		"status.phase":       string(pod.Status.Phase),
 	}
 	return generic.MergeFieldsSets(objectMetaFieldsSet, podSpecificFieldsSet)
 }
@@ -199,7 +201,7 @@ func getPod(getter ResourceGetter, ctx api.Context, name string) (*api.Pod, erro
 func ResourceLocation(getter ResourceGetter, rt http.RoundTripper, ctx api.Context, id string) (*url.URL, http.RoundTripper, error) {
 	// Allow ID as "podname" or "podname:port" or "scheme:podname:port".
 	// If port is not specified, try to use the first defined port on the pod.
-	scheme, name, port, valid := util.SplitSchemeNamePort(id)
+	scheme, name, port, valid := utilnet.SplitSchemeNamePort(id)
 	if !valid {
 		return nil, nil, errors.NewBadRequest(fmt.Sprintf("invalid pod request %q", id))
 	}
@@ -231,6 +233,15 @@ func ResourceLocation(getter ResourceGetter, rt http.RoundTripper, ctx api.Conte
 	return loc, rt, nil
 }
 
+// getContainerNames returns a formatted string containing the container names
+func getContainerNames(pod *api.Pod) string {
+	names := []string{}
+	for _, c := range pod.Spec.Containers {
+		names = append(names, c.Name)
+	}
+	return strings.Join(names, " ")
+}
+
 // LogLocation returns the log URL for a pod container. If opts.Container is blank
 // and only one container is present in the pod, that container is used.
 func LogLocation(
@@ -249,10 +260,14 @@ func LogLocation(
 	// If a container was provided, it must be valid
 	container := opts.Container
 	if len(container) == 0 {
-		if len(pod.Spec.Containers) == 1 {
+		switch len(pod.Spec.Containers) {
+		case 1:
 			container = pod.Spec.Containers[0].Name
-		} else {
+		case 0:
 			return nil, nil, errors.NewBadRequest(fmt.Sprintf("a container name must be specified for pod %s", name))
+		default:
+			containerNames := getContainerNames(pod)
+			return nil, nil, errors.NewBadRequest(fmt.Sprintf("a container name must be specified for pod %s, choose one of: [%s]", name, containerNames))
 		}
 	} else {
 		if !podHasContainerWithName(pod, container) {
@@ -386,10 +401,14 @@ func streamLocation(
 	// Try to figure out a container
 	// If a container was provided, it must be valid
 	if container == "" {
-		if len(pod.Spec.Containers) == 1 {
+		switch len(pod.Spec.Containers) {
+		case 1:
 			container = pod.Spec.Containers[0].Name
-		} else {
+		case 0:
 			return nil, nil, errors.NewBadRequest(fmt.Sprintf("a container name must be specified for pod %s", name))
+		default:
+			containerNames := getContainerNames(pod)
+			return nil, nil, errors.NewBadRequest(fmt.Sprintf("a container name must be specified for pod %s, choose one of: [%s]", name, containerNames))
 		}
 	} else {
 		if !podHasContainerWithName(pod, container) {

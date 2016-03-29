@@ -22,10 +22,10 @@ import (
 	"time"
 
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/unversioned"
 	client "k8s.io/kubernetes/pkg/client/unversioned"
 	"k8s.io/kubernetes/pkg/fields"
 	"k8s.io/kubernetes/pkg/labels"
+	"k8s.io/kubernetes/pkg/util/sets"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -45,7 +45,7 @@ const (
 	rebootPodReadyAgainTimeout = 5 * time.Minute
 )
 
-var _ = Describe("Reboot", func() {
+var _ = KubeDescribe("Reboot [Disruptive] [Feature:Reboot]", func() {
 	var f *Framework
 
 	BeforeEach(func() {
@@ -62,16 +62,27 @@ var _ = Describe("Reboot", func() {
 			// events for the kube-system namespace on failures
 			namespaceName := api.NamespaceSystem
 			By(fmt.Sprintf("Collecting events from namespace %q.", namespaceName))
-			events, err := f.Client.Events(namespaceName).List(unversioned.ListOptions{})
+			events, err := f.Client.Events(namespaceName).List(api.ListOptions{})
 			Expect(err).NotTo(HaveOccurred())
 
 			for _, e := range events.Items {
 				Logf("event for %v: %v %v: %v", e.InvolvedObject.Name, e.Source, e.Reason, e.Message)
 			}
 		}
+		// In GKE, our current tunneling setup has the potential to hold on to a broken tunnel (from a
+		// rebooted/deleted node) for up to 5 minutes before all tunnels are dropped and recreated.  Most tests
+		// make use of some proxy feature to verify functionality. So, if a reboot test runs right before a test
+		// that tries to get logs, for example, we may get unlucky and try to use a closed tunnel to a node that
+		// was recently rebooted. There's no good way to poll for proxies being closed, so we sleep.
+		//
+		// TODO(cjcullen) reduce this sleep (#19314)
+		if providerIs("gke") {
+			By("waiting 5 minutes for all dead tunnels to be dropped")
+			time.Sleep(5 * time.Minute)
+		}
 	})
 
-	f = NewFramework("reboot")
+	f = NewDefaultFramework("reboot")
 
 	It("each node by ordering clean reboot and ensure they function upon restart", func() {
 		// clean shutdown and restart
@@ -116,10 +127,7 @@ var _ = Describe("Reboot", func() {
 
 func testReboot(c *client.Client, rebootCmd string) {
 	// Get all nodes, and kick off the test on each.
-	nodelist, err := listNodes(c, labels.Everything(), fields.Everything())
-	if err != nil {
-		Failf("Error getting nodes: %v", err)
-	}
+	nodelist := ListSchedulableNodesOrDie(c)
 	result := make([]bool, len(nodelist.Items))
 	wg := sync.WaitGroup{}
 	wg.Add(len(nodelist.Items))
@@ -150,6 +158,43 @@ func testReboot(c *client.Client, rebootCmd string) {
 	}
 }
 
+func printStatusAndLogsForNotReadyPods(c *client.Client, ns string, podNames []string, pods []*api.Pod) {
+	printFn := func(id, log string, err error, previous bool) {
+		prefix := "Retrieving log for container"
+		if previous {
+			prefix = "Retrieving log for the last terminated container"
+		}
+		if err != nil {
+			Logf("%s %s, err: %v:\n%s\n", prefix, id, err, log)
+		} else {
+			Logf("%s %s:\n%s\n", prefix, id, log)
+		}
+	}
+	podNameSet := sets.NewString(podNames...)
+	for _, p := range pods {
+		if p.Namespace != ns {
+			continue
+		}
+		if !podNameSet.Has(p.Name) {
+			continue
+		}
+		if ok, _ := podRunningReady(p); ok {
+			continue
+		}
+		Logf("Status for not ready pod %s/%s: %+v", p.Namespace, p.Name, p.Status)
+		// Print the log of the containers if pod is not running and ready.
+		for _, container := range p.Status.ContainerStatuses {
+			cIdentifer := fmt.Sprintf("%s/%s/%s", p.Namespace, p.Name, container.Name)
+			log, err := getPodLogs(c, p.Namespace, p.Name, container.Name)
+			printFn(cIdentifer, log, err, false)
+			// Get log from the previous container.
+			if container.RestartCount > 0 {
+				printFn(cIdentifer, log, err, true)
+			}
+		}
+	}
+}
+
 // rebootNode takes node name on provider through the following steps using c:
 //  - ensures the node is ready
 //  - ensures all pods on the node are running and ready
@@ -163,7 +208,7 @@ func testReboot(c *client.Client, rebootCmd string) {
 func rebootNode(c *client.Client, provider, name, rebootCmd string) bool {
 	// Setup
 	ns := api.NamespaceSystem
-	ps := newPodStore(c, ns, labels.Everything(), fields.OneTermEqualSelector(client.PodHost, name))
+	ps := newPodStore(c, ns, labels.Everything(), fields.OneTermEqualSelector(api.PodHostField, name))
 	defer ps.Stop()
 
 	// Get the node initially.
@@ -200,6 +245,7 @@ func rebootNode(c *client.Client, provider, name, rebootCmd string) bool {
 	// For each pod, we do a sanity check to ensure it's running / healthy
 	// now, as that's what we'll be checking later.
 	if !checkPodsRunningReady(c, ns, podNames, podReadyBeforeTimeout) {
+		printStatusAndLogsForNotReadyPods(c, ns, podNames, pods)
 		return false
 	}
 
@@ -222,6 +268,8 @@ func rebootNode(c *client.Client, provider, name, rebootCmd string) bool {
 	// Ensure all of the pods that we found on this node before the reboot are
 	// running / healthy.
 	if !checkPodsRunningReady(c, ns, podNames, rebootPodReadyAgainTimeout) {
+		newPods := ps.List()
+		printStatusAndLogsForNotReadyPods(c, ns, podNames, newPods)
 		return false
 	}
 

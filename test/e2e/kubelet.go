@@ -21,7 +21,6 @@ import (
 	"strings"
 	"time"
 
-	"k8s.io/kubernetes/pkg/api/unversioned"
 	client "k8s.io/kubernetes/pkg/client/unversioned"
 	"k8s.io/kubernetes/pkg/util"
 	"k8s.io/kubernetes/pkg/util/sets"
@@ -87,15 +86,14 @@ func waitTillNPodsRunningOnNodes(c *client.Client, nodeNames sets.String, podNam
 	})
 }
 
-var _ = Describe("kubelet", func() {
+var _ = KubeDescribe("kubelet", func() {
 	var numNodes int
 	var nodeNames sets.String
-	framework := NewFramework("kubelet")
+	framework := NewDefaultFramework("kubelet")
 	var resourceMonitor *resourceMonitor
 
 	BeforeEach(func() {
-		nodes, err := framework.Client.Nodes().List(unversioned.ListOptions{})
-		expectNoError(err)
+		nodes := ListSchedulableNodesOrDie(framework.Client)
 		numNodes = len(nodes.Items)
 		nodeNames = sets.NewString()
 		for _, node := range nodes.Items {
@@ -109,7 +107,7 @@ var _ = Describe("kubelet", func() {
 		resourceMonitor.Stop()
 	})
 
-	Describe("Clean up pods on node", func() {
+	KubeDescribe("Clean up pods on node", func() {
 		type DeleteTest struct {
 			podsPerNode int
 			timeout     time.Duration

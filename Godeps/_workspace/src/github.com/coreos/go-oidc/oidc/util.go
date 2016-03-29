@@ -53,14 +53,14 @@ func CookieTokenExtractor(cookieName string) RequestTokenExtractor {
 	}
 }
 
-func NewClaims(iss, sub, aud string, iat, exp time.Time) jose.Claims {
+func NewClaims(iss, sub string, aud interface{}, iat, exp time.Time) jose.Claims {
 	return jose.Claims{
 		// required
 		"iss": iss,
 		"sub": sub,
 		"aud": aud,
-		"iat": float64(iat.Unix()),
-		"exp": float64(exp.Unix()),
+		"iat": iat.Unix(),
+		"exp": exp.Unix(),
 	}
 }
 

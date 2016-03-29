@@ -18,9 +18,10 @@
 If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
+<!-- TAG RELEASE_LINK, added by the munger automatically -->
 <strong>
 The latest release of this document can be found
-[here](http://releases.k8s.io/release-1.1/examples/selenium/README.md).
+[here](http://releases.k8s.io/release-1.2/examples/selenium/README.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -81,7 +82,7 @@ export PODNAME=`kubectl get pods --selector="app=selenium-hub" --output=template
 kubectl port-forward --pod=$PODNAME 4444:4444
 ```
 
-In a seperate terminal, you can now check the status.
+In a separate terminal, you can now check the status.
 
 ```console
 curl http://localhost:4444
@@ -221,7 +222,7 @@ To remove all created resources, run the following:
 kubectl delete rc selenium-hub
 kubectl delete rc selenium-node-chrome
 kubectl delete rc selenium-node-firefox
-kubectl delete rc selenium-python
+kubectl delete deployment selenium-python
 kubectl delete svc selenium-hub
 kubectl delete svc selenium-hub-external
 ```

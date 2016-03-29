@@ -21,22 +21,23 @@ import (
 	"strings"
 
 	docker "github.com/fsouza/go-dockerclient"
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/unversioned"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
-	kubetypes "k8s.io/kubernetes/pkg/kubelet/types"
 )
 
 // This file contains helper functions to convert docker API types to runtime
 // (kubecontainer) types.
+const (
+	statusRunningPrefix = "Up"
+	statusExitedPrefix  = "Exited"
+)
 
 func mapState(state string) kubecontainer.ContainerState {
 	// Parse the state string in docker.APIContainers. This could break when
 	// we upgrade docker.
 	switch {
-	case strings.HasPrefix(state, "Up"):
+	case strings.HasPrefix(state, statusRunningPrefix):
 		return kubecontainer.ContainerStateRunning
-	case strings.HasPrefix(state, "Exited"):
+	case strings.HasPrefix(state, statusExitedPrefix):
 		return kubecontainer.ContainerStateExited
 	default:
 		return kubecontainer.ContainerStateUnknown
@@ -55,7 +56,7 @@ func toRuntimeContainer(c *docker.APIContainers) (*kubecontainer.Container, erro
 	}
 
 	return &kubecontainer.Container{
-		ID:      kubetypes.DockerID(c.ID).ContainerID(),
+		ID:      kubecontainer.DockerID(c.ID).ContainerID(),
 		Name:    dockerName.ContainerName,
 		Image:   c.Image,
 		Hash:    hash,
@@ -75,36 +76,8 @@ func toRuntimeImage(image *docker.APIImages) (*kubecontainer.Image, error) {
 	}
 
 	return &kubecontainer.Image{
-		ID:   image.ID,
-		Tags: image.RepoTags,
-		Size: image.VirtualSize,
+		ID:       image.ID,
+		RepoTags: image.RepoTags,
+		Size:     image.VirtualSize,
 	}, nil
-}
-
-// convert ContainerStatus to api.ContainerStatus.
-func containerStatusToAPIContainerStatus(containerStatus *kubecontainer.ContainerStatus) *api.ContainerStatus {
-	containerID := DockerPrefix + containerStatus.ID.ID
-	status := api.ContainerStatus{
-		Name:         containerStatus.Name,
-		RestartCount: containerStatus.RestartCount,
-		Image:        containerStatus.Image,
-		ImageID:      containerStatus.ImageID,
-		ContainerID:  containerID,
-	}
-	switch containerStatus.State {
-	case kubecontainer.ContainerStateRunning:
-		status.State.Running = &api.ContainerStateRunning{StartedAt: unversioned.NewTime(containerStatus.StartedAt)}
-	case kubecontainer.ContainerStateExited:
-		status.State.Terminated = &api.ContainerStateTerminated{
-			ExitCode:    containerStatus.ExitCode,
-			Reason:      containerStatus.Reason,
-			Message:     containerStatus.Message,
-			StartedAt:   unversioned.NewTime(containerStatus.StartedAt),
-			FinishedAt:  unversioned.NewTime(containerStatus.FinishedAt),
-			ContainerID: containerID,
-		}
-	default:
-		status.State.Waiting = &api.ContainerStateWaiting{}
-	}
-	return &status
 }

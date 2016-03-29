@@ -15,9 +15,10 @@ base:
     - docker
 {% if pillar.get('network_provider', '').lower() == 'flannel' %}
     - flannel
+{% elif pillar.get('network_provider', '').lower() == 'kubenet' %}
+    - cni
 {% endif %}
     - helpers
-    - cadvisor
     - kube-client-tools
     - kube-node-unpacker
     - kubelet
@@ -46,15 +47,13 @@ base:
 {% if pillar.get('network_provider', '').lower() == 'flannel' %}
     - flannel-server
     - flannel
+{% elif pillar.get('network_provider', '').lower() == 'kubenet' %}
+    - cni
 {% endif %}
     - kube-apiserver
     - kube-controller-manager
     - kube-scheduler
     - supervisor
-{% if grains['cloud'] is defined and not grains.cloud in [ 'aws', 'gce', 'vagrant' ] %}
-    - nginx
-{% endif %}
-    - cadvisor
     - kube-client-tools
     - kube-master-addons
     - kube-admission-controls
@@ -69,14 +68,10 @@ base:
     - logrotate
 {% endif %}
     - kube-addons
-{% if grains['cloud'] is defined and grains['cloud'] in [ 'vagrant', 'gce', 'aws' ] %}
+{% if grains['cloud'] is defined and grains['cloud'] in [ 'vagrant', 'gce', 'aws', 'vsphere' ] %}
     - docker
     - kubelet
 {% endif %}
 {% if pillar.get('network_provider', '').lower() == 'opencontrail' %}
     - opencontrail-networking-master
 {% endif %}
-
-  'roles:kubernetes-pool-vsphere':
-    - match: grain
-    - static-routes

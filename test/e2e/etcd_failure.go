@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/util/wait"
 
@@ -28,10 +27,9 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-var _ = Describe("Etcd failure", func() {
+var _ = KubeDescribe("Etcd failure [Disruptive]", func() {
 
-	var skipped bool
-	framework := NewFramework("etcd-failure")
+	framework := NewDefaultFramework("etcd-failure")
 
 	BeforeEach(func() {
 		// This test requires:
@@ -39,9 +37,7 @@ var _ = Describe("Etcd failure", func() {
 		// - master access
 		// ... so the provider check should be identical to the intersection of
 		// providers that provide those capabilities.
-		skipped = true
 		SkipUnlessProviderIs("gce")
-		skipped = false
 
 		Expect(RunRC(RCConfig{
 			Client:    framework.Client,
@@ -74,7 +70,7 @@ func etcdFailTest(framework *Framework, failCommand, fixCommand string) {
 
 	checkExistingRCRecovers(framework)
 
-	ServeImageOrFail(framework, "basic", "gcr.io/google_containers/serve_hostname:1.1")
+	ServeImageOrFail(framework, "basic", "gcr.io/google_containers/serve_hostname:v1.4")
 }
 
 // For this duration, etcd will be failed by executing a failCommand on the master.
@@ -108,7 +104,7 @@ func checkExistingRCRecovers(f *Framework) {
 
 	By("deleting pods from existing replication controller")
 	expectNoError(wait.Poll(time.Millisecond*500, time.Second*60, func() (bool, error) {
-		options := unversioned.ListOptions{LabelSelector: unversioned.LabelSelector{rcSelector}}
+		options := api.ListOptions{LabelSelector: rcSelector}
 		pods, err := podClient.List(options)
 		if err != nil {
 			Logf("apiserver returned error, as expected before recovery: %v", err)
@@ -127,7 +123,7 @@ func checkExistingRCRecovers(f *Framework) {
 
 	By("waiting for replication controller to recover")
 	expectNoError(wait.Poll(time.Millisecond*500, time.Second*60, func() (bool, error) {
-		options := unversioned.ListOptions{LabelSelector: unversioned.LabelSelector{rcSelector}}
+		options := api.ListOptions{LabelSelector: rcSelector}
 		pods, err := podClient.List(options)
 		Expect(err).NotTo(HaveOccurred())
 		for _, pod := range pods.Items {

@@ -21,7 +21,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"runtime"
+	goruntime "runtime"
 	"sync"
 	"testing"
 	"time"
@@ -29,16 +29,22 @@ import (
 	"github.com/golang/glog"
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/testapi"
-	"k8s.io/kubernetes/pkg/api/unversioned"
+	"k8s.io/kubernetes/pkg/apis/autoscaling"
+	"k8s.io/kubernetes/pkg/apis/batch"
+	"k8s.io/kubernetes/pkg/apis/extensions"
 	"k8s.io/kubernetes/pkg/apiserver"
+	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 	"k8s.io/kubernetes/pkg/client/record"
+	"k8s.io/kubernetes/pkg/client/restclient"
 	client "k8s.io/kubernetes/pkg/client/unversioned"
 	"k8s.io/kubernetes/pkg/controller"
 	replicationcontroller "k8s.io/kubernetes/pkg/controller/replication"
 	"k8s.io/kubernetes/pkg/fields"
+	"k8s.io/kubernetes/pkg/genericapiserver"
 	"k8s.io/kubernetes/pkg/kubectl"
 	kubeletclient "k8s.io/kubernetes/pkg/kubelet/client"
 	"k8s.io/kubernetes/pkg/master"
+	"k8s.io/kubernetes/pkg/runtime"
 	etcdstorage "k8s.io/kubernetes/pkg/storage/etcd"
 	"k8s.io/kubernetes/pkg/storage/etcd/etcdtest"
 	"k8s.io/kubernetes/plugin/pkg/admission/admit"
@@ -98,14 +104,16 @@ func NewMasterComponents(c *Config) *MasterComponents {
 	if c.DeleteEtcdKeys {
 		DeleteAllEtcdKeys()
 	}
-	restClient := client.NewOrDie(&client.Config{Host: s.URL, GroupVersion: testapi.Default.GroupVersion(), QPS: c.QPS, Burst: c.Burst})
+	// TODO: caesarxuchao: remove this client when the refactoring of client libraray is done.
+	restClient := client.NewOrDie(&restclient.Config{Host: s.URL, ContentConfig: restclient.ContentConfig{GroupVersion: testapi.Default.GroupVersion()}, QPS: c.QPS, Burst: c.Burst})
+	clientset := clientset.NewForConfigOrDie(&restclient.Config{Host: s.URL, ContentConfig: restclient.ContentConfig{GroupVersion: testapi.Default.GroupVersion()}, QPS: c.QPS, Burst: c.Burst})
 	rcStopCh := make(chan struct{})
-	controllerManager := replicationcontroller.NewReplicationManager(restClient, controller.NoResyncPeriodFunc, c.Burst)
+	controllerManager := replicationcontroller.NewReplicationManager(clientset, controller.NoResyncPeriodFunc, c.Burst, 4096)
 
 	// TODO: Support events once we can cleanly shutdown an event recorder.
 	controllerManager.SetEventRecorder(&record.FakeRecorder{})
 	if c.StartReplicationManager {
-		go controllerManager.Run(runtime.NumCPU(), rcStopCh)
+		go controllerManager.Run(goruntime.NumCPU(), rcStopCh)
 	}
 	var once sync.Once
 	return &MasterComponents{
@@ -130,7 +138,11 @@ func startMasterOrDie(masterConfig *master.Config) (*master.Master, *httptest.Se
 		masterConfig.EnableProfiling = true
 		masterConfig.EnableSwaggerSupport = true
 	}
-	m = master.New(masterConfig)
+	m, err := master.New(masterConfig)
+	if err != nil {
+		glog.Fatalf("error in bringing up the master: %v", err)
+	}
+
 	return m, s
 }
 
@@ -138,22 +150,34 @@ func startMasterOrDie(masterConfig *master.Config) (*master.Master, *httptest.Se
 func NewMasterConfig() *master.Config {
 	etcdClient := NewEtcdClient()
 	storageVersions := make(map[string]string)
-	etcdStorage := etcdstorage.NewEtcdStorage(etcdClient, testapi.Default.Codec(), etcdtest.PathPrefix())
-	storageVersions[""] = testapi.Default.GroupAndVersion()
+
+	etcdStorage := etcdstorage.NewEtcdStorage(etcdClient, testapi.Default.Codec(), etcdtest.PathPrefix(), false)
+	storageVersions[api.GroupName] = testapi.Default.GroupVersion().String()
+	autoscalingEtcdStorage := NewAutoscalingEtcdStorage(etcdClient)
+	storageVersions[autoscaling.GroupName] = testapi.Autoscaling.GroupVersion().String()
+	batchEtcdStorage := NewBatchEtcdStorage(etcdClient)
+	storageVersions[batch.GroupName] = testapi.Batch.GroupVersion().String()
 	expEtcdStorage := NewExtensionsEtcdStorage(etcdClient)
-	storageVersions["extensions"] = testapi.Extensions.GroupAndVersion()
-	storageDestinations := master.NewStorageDestinations()
-	storageDestinations.AddAPIGroup("", etcdStorage)
-	storageDestinations.AddAPIGroup("extensions", expEtcdStorage)
+	storageVersions[extensions.GroupName] = testapi.Extensions.GroupVersion().String()
+
+	storageDestinations := genericapiserver.NewStorageDestinations()
+	storageDestinations.AddAPIGroup(api.GroupName, etcdStorage)
+	storageDestinations.AddAPIGroup(autoscaling.GroupName, autoscalingEtcdStorage)
+	storageDestinations.AddAPIGroup(batch.GroupName, batchEtcdStorage)
+	storageDestinations.AddAPIGroup(extensions.GroupName, expEtcdStorage)
 
 	return &master.Config{
-		StorageDestinations: storageDestinations,
-		StorageVersions:     storageVersions,
-		KubeletClient:       kubeletclient.FakeKubeletClient{},
-		APIPrefix:           "/api",
-		APIGroupPrefix:      "/apis",
-		Authorizer:          apiserver.NewAlwaysAllowAuthorizer(),
-		AdmissionControl:    admit.NewAlwaysAdmit(),
+		Config: &genericapiserver.Config{
+			StorageDestinations:     storageDestinations,
+			StorageVersions:         storageVersions,
+			APIResourceConfigSource: master.DefaultAPIResourceConfigSource(),
+			APIPrefix:               "/api",
+			APIGroupPrefix:          "/apis",
+			Authorizer:              apiserver.NewAlwaysAllowAuthorizer(),
+			AdmissionControl:        admit.NewAlwaysAdmit(),
+			Serializer:              api.Codecs,
+		},
+		KubeletClient: kubeletclient.FakeKubeletClient{},
 	}
 }
 
@@ -163,6 +187,7 @@ func NewIntegrationTestMasterConfig() *master.Config {
 	masterConfig.EnableCoreControllers = true
 	masterConfig.EnableIndex = true
 	masterConfig.PublicAddress = net.ParseIP("192.168.10.4")
+	masterConfig.APIResourceConfigSource = master.DefaultAPIResourceConfigSource()
 	return masterConfig
 }
 
@@ -178,7 +203,8 @@ func (m *MasterComponents) Stop(apiServer, rcManager bool) {
 		m.once.Do(m.stopRCManager)
 	}
 	if apiServer {
-		m.ApiServer.Close()
+		// TODO: Uncomment when fix #19254
+		// m.ApiServer.Close()
 	}
 }
 
@@ -189,7 +215,7 @@ func RCFromManifest(fileName string) *api.ReplicationController {
 		glog.Fatalf("Unexpected error reading rc manifest %v", err)
 	}
 	var controller api.ReplicationController
-	if err := api.Scheme.DecodeInto(data, &controller); err != nil {
+	if err := runtime.DecodeInto(testapi.Default.Codec(), data, &controller); err != nil {
 		glog.Fatalf("Unexpected error reading rc manifest %v", err)
 	}
 	return &controller
@@ -248,8 +274,8 @@ func StartPods(numPods int, host string, restClient *client.Client) error {
 	defer func() {
 		glog.Infof("StartPods took %v with numPods %d", time.Since(start), numPods)
 	}()
-	hostField := fields.OneTermEqualSelector(client.PodHost, host)
-	options := unversioned.ListOptions{FieldSelector: unversioned.FieldSelector{hostField}}
+	hostField := fields.OneTermEqualSelector(api.PodHostField, host)
+	options := api.ListOptions{FieldSelector: hostField}
 	pods, err := restClient.Pods(TestNS).List(options)
 	if err != nil || len(pods.Items) == numPods {
 		return err
@@ -278,7 +304,11 @@ func StartPods(numPods int, host string, restClient *client.Client) error {
 func RunAMaster(t *testing.T) (*master.Master, *httptest.Server) {
 	masterConfig := NewMasterConfig()
 	masterConfig.EnableProfiling = true
-	m := master.New(masterConfig)
+	m, err := master.New(masterConfig)
+	if err != nil {
+		// TODO: Return error.
+		glog.Fatalf("error in bringing up the master: %v", err)
+	}
 
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		m.Handler.ServeHTTP(w, req)

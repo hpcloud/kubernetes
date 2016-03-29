@@ -19,13 +19,14 @@ package e2e
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
+
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/latest"
 	"k8s.io/kubernetes/pkg/api/unversioned"
+	"k8s.io/kubernetes/pkg/apimachinery/registered"
 	client "k8s.io/kubernetes/pkg/client/unversioned"
-	"net/url"
 )
 
 const (
@@ -36,7 +37,7 @@ const (
 	notPrivilegedHttpPort      = 9090
 	notPrivilegedUdpPort       = 9091
 	notPrivilegedContainerName = "not-privileged-container"
-	privilegedContainerImage   = "gcr.io/google_containers/netexec:1.1"
+	privilegedContainerImage   = "gcr.io/google_containers/netexec:1.4"
 	privilegedCommand          = "ip link add dummy1 type dummy"
 )
 
@@ -46,8 +47,8 @@ type PrivilegedPodTestConfig struct {
 	hostExecPod   *api.Pod
 }
 
-var _ = Describe("PrivilegedPod", func() {
-	f := NewFramework("e2e-privilegedpod")
+var _ = KubeDescribe("PrivilegedPod", func() {
+	f := NewDefaultFramework("e2e-privilegedpod")
 	config := &PrivilegedPodTestConfig{
 		f: f,
 	}
@@ -102,7 +103,7 @@ func (config *PrivilegedPodTestConfig) createPrivilegedPodSpec() *api.Pod {
 	pod := &api.Pod{
 		TypeMeta: unversioned.TypeMeta{
 			Kind:       "Pod",
-			APIVersion: latest.GroupOrDie("").GroupVersion.Version,
+			APIVersion: registered.GroupOrDie(api.GroupName).GroupVersion.String(),
 		},
 		ObjectMeta: api.ObjectMeta{
 			Name:      privilegedPodName,

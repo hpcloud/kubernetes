@@ -38,6 +38,8 @@ import (
 
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/testapi"
+	"k8s.io/kubernetes/pkg/apis/autoscaling"
+	"k8s.io/kubernetes/pkg/apis/extensions"
 	"k8s.io/kubernetes/pkg/apiserver"
 	"k8s.io/kubernetes/pkg/auth/authenticator"
 	"k8s.io/kubernetes/pkg/auth/authenticator/bearertoken"
@@ -79,7 +81,7 @@ func timeoutPath(resource, namespace, name string) string {
 var aPod string = `
 {
   "kind": "Pod",
-  "apiVersion": "` + testapi.Default.Version() + `",
+  "apiVersion": "` + testapi.Default.GroupVersion().String() + `",
   "metadata": {
     "name": "a",
     "creationTimestamp": null%s
@@ -97,7 +99,7 @@ var aPod string = `
 var aRC string = `
 {
   "kind": "ReplicationController",
-  "apiVersion": "` + testapi.Default.Version() + `",
+  "apiVersion": "` + testapi.Default.GroupVersion().String() + `",
   "metadata": {
     "name": "a",
     "labels": {
@@ -130,7 +132,7 @@ var aRC string = `
 var aService string = `
 {
   "kind": "Service",
-  "apiVersion": "` + testapi.Default.Version() + `",
+  "apiVersion": "` + testapi.Default.GroupVersion().String() + `",
   "metadata": {
     "name": "a",
     "labels": {
@@ -154,7 +156,7 @@ var aService string = `
 var aNode string = `
 {
   "kind": "Node",
-  "apiVersion": "` + testapi.Default.Version() + `",
+  "apiVersion": "` + testapi.Default.GroupVersion().String() + `",
   "metadata": {
     "name": "a"%s
   },
@@ -166,7 +168,7 @@ var aNode string = `
 var aEvent string = `
 {
   "kind": "Event",
-  "apiVersion": "` + testapi.Default.Version() + `",
+  "apiVersion": "` + testapi.Default.GroupVersion().String() + `",
   "metadata": {
     "name": "a"%s
   },
@@ -182,7 +184,7 @@ var aEvent string = `
 var aBinding string = `
 {
   "kind": "Binding",
-  "apiVersion": "` + testapi.Default.Version() + `",
+  "apiVersion": "` + testapi.Default.GroupVersion().String() + `",
   "metadata": {
     "name": "a"%s
   },
@@ -205,7 +207,7 @@ var emptyEndpoints string = `
 var aEndpoints string = `
 {
   "kind": "Endpoints",
-  "apiVersion": "` + testapi.Default.Version() + `",
+  "apiVersion": "` + testapi.Default.GroupVersion().String() + `",
   "metadata": {
     "name": "a"%s
   },
@@ -230,7 +232,7 @@ var aEndpoints string = `
 var deleteNow string = `
 {
   "kind": "DeleteOptions",
-  "apiVersion": "` + testapi.Default.Version() + `",
+  "apiVersion": "` + testapi.Default.GroupVersion().String() + `",
   "gracePeriodSeconds": 0%s
 }
 `
@@ -389,10 +391,14 @@ func TestAuthModeAlwaysAllow(t *testing.T) {
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		m.Handler.ServeHTTP(w, req)
 	}))
-	defer s.Close()
+	// TODO: Uncomment when fix #19254
+	// defer s.Close()
 
 	masterConfig := framework.NewIntegrationTestMasterConfig()
-	m = master.New(masterConfig)
+	m, err := master.New(masterConfig)
+	if err != nil {
+		t.Fatalf("error in bringing up the master: %v", err)
+	}
 
 	transport := http.DefaultTransport
 	previousResourceVersion := make(map[string]float64)
@@ -491,11 +497,15 @@ func TestAuthModeAlwaysDeny(t *testing.T) {
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		m.Handler.ServeHTTP(w, req)
 	}))
-	defer s.Close()
+	// TODO: Uncomment when fix #19254
+	// defer s.Close()
 
 	masterConfig := framework.NewIntegrationTestMasterConfig()
 	masterConfig.Authorizer = apiserver.NewAlwaysDenyAuthorizer()
-	m = master.New(masterConfig)
+	m, err := master.New(masterConfig)
+	if err != nil {
+		t.Fatalf("error in bringing up the master: %v", err)
+	}
 
 	transport := http.DefaultTransport
 
@@ -545,13 +555,17 @@ func TestAliceNotForbiddenOrUnauthorized(t *testing.T) {
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		m.Handler.ServeHTTP(w, req)
 	}))
-	defer s.Close()
+	// TODO: Uncomment when fix #19254
+	// defer s.Close()
 
 	masterConfig := framework.NewIntegrationTestMasterConfig()
 	masterConfig.Authenticator = getTestTokenAuth()
 	masterConfig.Authorizer = allowAliceAuthorizer{}
 	masterConfig.AdmissionControl = admit.NewAlwaysAdmit()
-	m = master.New(masterConfig)
+	m, err := master.New(masterConfig)
+	if err != nil {
+		t.Fatalf("error in bringing up the master: %v", err)
+	}
 
 	previousResourceVersion := make(map[string]float64)
 	transport := http.DefaultTransport
@@ -620,12 +634,16 @@ func TestBobIsForbidden(t *testing.T) {
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		m.Handler.ServeHTTP(w, req)
 	}))
-	defer s.Close()
+	// TODO: Uncomment when fix #19254
+	// defer s.Close()
 
 	masterConfig := framework.NewIntegrationTestMasterConfig()
 	masterConfig.Authenticator = getTestTokenAuth()
 	masterConfig.Authorizer = allowAliceAuthorizer{}
-	m = master.New(masterConfig)
+	m, err := master.New(masterConfig)
+	if err != nil {
+		t.Fatalf("error in bringing up the master: %v", err)
+	}
 
 	transport := http.DefaultTransport
 
@@ -668,12 +686,16 @@ func TestUnknownUserIsUnauthorized(t *testing.T) {
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		m.Handler.ServeHTTP(w, req)
 	}))
-	defer s.Close()
+	// TODO: Uncomment when fix #19254
+	// defer s.Close()
 
 	masterConfig := framework.NewIntegrationTestMasterConfig()
 	masterConfig.Authenticator = getTestTokenAuth()
 	masterConfig.Authorizer = allowAliceAuthorizer{}
-	m = master.New(masterConfig)
+	m, err := master.New(masterConfig)
+	if err != nil {
+		t.Fatalf("error in bringing up the master: %v", err)
+	}
 
 	transport := http.DefaultTransport
 
@@ -741,12 +763,16 @@ func TestAuthorizationAttributeDetermination(t *testing.T) {
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		m.Handler.ServeHTTP(w, req)
 	}))
-	defer s.Close()
+	// TODO: Uncomment when fix #19254
+	// defer s.Close()
 
 	masterConfig := framework.NewIntegrationTestMasterConfig()
 	masterConfig.Authenticator = getTestTokenAuth()
 	masterConfig.Authorizer = trackingAuthorizer
-	m = master.New(masterConfig)
+	m, err := master.New(masterConfig)
+	if err != nil {
+		t.Fatalf("error in bringing up the master: %v", err)
+	}
 
 	transport := http.DefaultTransport
 
@@ -755,8 +781,9 @@ func TestAuthorizationAttributeDetermination(t *testing.T) {
 		URL                string
 		expectedAttributes authorizer.Attributes
 	}{
-		"prefix/version/resource":       {"GET", "/api/v1/pods", authorizer.AttributesRecord{APIGroup: "", Resource: "pods"}},
-		"prefix/group/version/resource": {"GET", "/apis/extensions/v1/pods", authorizer.AttributesRecord{APIGroup: "extensions", Resource: "pods"}},
+		"prefix/version/resource":        {"GET", "/api/v1/pods", authorizer.AttributesRecord{APIGroup: api.GroupName, Resource: "pods"}},
+		"prefix/group/version/resource":  {"GET", "/apis/extensions/v1/pods", authorizer.AttributesRecord{APIGroup: extensions.GroupName, Resource: "pods"}},
+		"prefix/group/version/resource2": {"GET", "/apis/autoscaling/v1/horizontalpodautoscalers", authorizer.AttributesRecord{APIGroup: autoscaling.GroupName, Resource: "horizontalpodautoscalers"}},
 	}
 
 	currentAuthorizationAttributesIndex := 0
@@ -809,12 +836,16 @@ func TestNamespaceAuthorization(t *testing.T) {
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		m.Handler.ServeHTTP(w, req)
 	}))
-	defer s.Close()
+	// TODO: Uncomment when fix #19254
+	// defer s.Close()
 
 	masterConfig := framework.NewIntegrationTestMasterConfig()
 	masterConfig.Authenticator = getTestTokenAuth()
 	masterConfig.Authorizer = a
-	m = master.New(masterConfig)
+	m, err := master.New(masterConfig)
+	if err != nil {
+		t.Fatalf("error in bringing up the master: %v", err)
+	}
 
 	previousResourceVersion := make(map[string]float64)
 	transport := http.DefaultTransport
@@ -911,12 +942,16 @@ func TestKindAuthorization(t *testing.T) {
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		m.Handler.ServeHTTP(w, req)
 	}))
-	defer s.Close()
+	// TODO: Uncomment when fix #19254
+	// defer s.Close()
 
 	masterConfig := framework.NewIntegrationTestMasterConfig()
 	masterConfig.Authenticator = getTestTokenAuth()
 	masterConfig.Authorizer = a
-	m = master.New(masterConfig)
+	m, err := master.New(masterConfig)
+	if err != nil {
+		t.Fatalf("error in bringing up the master: %v", err)
+	}
 
 	previousResourceVersion := make(map[string]float64)
 	transport := http.DefaultTransport
@@ -1000,13 +1035,17 @@ func TestReadOnlyAuthorization(t *testing.T) {
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		m.Handler.ServeHTTP(w, req)
 	}))
-	defer s.Close()
+	// TODO: Uncomment when fix #19254
+	// defer s.Close()
 
 	masterConfig := framework.NewIntegrationTestMasterConfig()
 	masterConfig.Authenticator = getTestTokenAuth()
 	masterConfig.Authorizer = a
 
-	m = master.New(masterConfig)
+	m, err := master.New(masterConfig)
+	if err != nil {
+		t.Fatalf("error in bringing up the master: %v", err)
+	}
 
 	transport := http.DefaultTransport
 

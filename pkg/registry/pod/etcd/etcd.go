@@ -23,19 +23,20 @@ import (
 
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/errors"
-	etcderr "k8s.io/kubernetes/pkg/api/errors/etcd"
+	storeerr "k8s.io/kubernetes/pkg/api/errors/storage"
 	"k8s.io/kubernetes/pkg/api/rest"
 	"k8s.io/kubernetes/pkg/api/unversioned"
+	"k8s.io/kubernetes/pkg/api/validation"
 	"k8s.io/kubernetes/pkg/fields"
 	"k8s.io/kubernetes/pkg/kubelet/client"
 	"k8s.io/kubernetes/pkg/labels"
+	"k8s.io/kubernetes/pkg/registry/cachesize"
 	"k8s.io/kubernetes/pkg/registry/generic"
 	etcdgeneric "k8s.io/kubernetes/pkg/registry/generic/etcd"
 	"k8s.io/kubernetes/pkg/registry/pod"
 	podrest "k8s.io/kubernetes/pkg/registry/pod/rest"
 	"k8s.io/kubernetes/pkg/runtime"
 	"k8s.io/kubernetes/pkg/storage"
-	"k8s.io/kubernetes/pkg/util/validation"
 )
 
 // PodStorage includes storage for pods and all sub resources
@@ -57,17 +58,12 @@ type REST struct {
 }
 
 // NewStorage returns a RESTStorage object that will work against pods.
-func NewStorage(
-	s storage.Interface,
-	storageDecorator generic.StorageDecorator,
-	k client.ConnectionInfoGetter,
-	proxyTransport http.RoundTripper,
-) PodStorage {
+func NewStorage(opts generic.RESTOptions, k client.ConnectionInfoGetter, proxyTransport http.RoundTripper) PodStorage {
 	prefix := "/pods"
 
 	newListFunc := func() runtime.Object { return &api.PodList{} }
-	storageInterface := storageDecorator(
-		s, 1000, &api.Pod{}, prefix, true, newListFunc)
+	storageInterface := opts.Decorator(
+		opts.Storage, cachesize.GetWatchCacheSizeByResource(cachesize.Pods), &api.Pod{}, prefix, pod.Strategy, newListFunc)
 
 	store := &etcdgeneric.Etcd{
 		NewFunc:     func() runtime.Object { return &api.Pod{} },
@@ -84,7 +80,8 @@ func NewStorage(
 		PredicateFunc: func(label labels.Selector, field fields.Selector) generic.Matcher {
 			return pod.MatchPod(label, field)
 		},
-		EndpointName: "pods",
+		QualifiedResource:       api.Resource("pods"),
+		DeleteCollectionWorkers: opts.DeleteCollectionWorkers,
 
 		CreateStrategy:      pod.Strategy,
 		UpdateStrategy:      pod.Strategy,
@@ -93,8 +90,8 @@ func NewStorage(
 
 		Storage: storageInterface,
 	}
-	statusStore := *store
 
+	statusStore := *store
 	statusStore.UpdateStrategy = pod.StatusStrategy
 
 	return PodStorage{
@@ -132,13 +129,12 @@ var _ = rest.Creater(&BindingREST{})
 // Create ensures a pod is bound to a specific host.
 func (r *BindingREST) Create(ctx api.Context, obj runtime.Object) (out runtime.Object, err error) {
 	binding := obj.(*api.Binding)
+
 	// TODO: move me to a binding strategy
-	if len(binding.Target.Kind) != 0 && binding.Target.Kind != "Node" {
-		return nil, errors.NewInvalid("binding", binding.Name, validation.ErrorList{validation.NewInvalidError(validation.NewFieldPath("target", "kind"), binding.Target.Kind, "must be empty or 'Node'")})
+	if errs := validation.ValidatePodBinding(binding); len(errs) != 0 {
+		return nil, errs.ToAggregate()
 	}
-	if len(binding.Target.Name) == 0 {
-		return nil, errors.NewInvalid("binding", binding.Name, validation.ErrorList{validation.NewRequiredError(validation.NewFieldPath("target", "name"))})
-	}
+
 	err = r.assignPod(ctx, binding.Name, binding.Target.Name, binding.Annotations)
 	out = &unversioned.Status{Status: unversioned.StatusSuccess}
 	return
@@ -152,7 +148,7 @@ func (r *BindingREST) setPodHostAndAnnotations(ctx api.Context, podID, oldMachin
 	if err != nil {
 		return nil, err
 	}
-	err = r.store.Storage.GuaranteedUpdate(ctx, podKey, &api.Pod{}, false, storage.SimpleUpdate(func(obj runtime.Object) (runtime.Object, error) {
+	err = r.store.Storage.GuaranteedUpdate(ctx, podKey, &api.Pod{}, false, nil, storage.SimpleUpdate(func(obj runtime.Object) (runtime.Object, error) {
 		pod, ok := obj.(*api.Pod)
 		if !ok {
 			return nil, fmt.Errorf("unexpected object: %#v", obj)
@@ -179,10 +175,10 @@ func (r *BindingREST) setPodHostAndAnnotations(ctx api.Context, podID, oldMachin
 // assignPod assigns the given pod to the given machine.
 func (r *BindingREST) assignPod(ctx api.Context, podID string, machine string, annotations map[string]string) (err error) {
 	if _, err = r.setPodHostAndAnnotations(ctx, podID, "", machine, annotations); err != nil {
-		err = etcderr.InterpretGetError(err, "pod", podID)
-		err = etcderr.InterpretUpdateError(err, "pod", podID)
+		err = storeerr.InterpretGetError(err, api.Resource("pods"), podID)
+		err = storeerr.InterpretUpdateError(err, api.Resource("pods"), podID)
 		if _, ok := err.(*errors.StatusError); !ok {
-			err = errors.NewConflict("binding", podID, err)
+			err = errors.NewConflict(api.Resource("pods/binding"), podID, err)
 		}
 	}
 	return

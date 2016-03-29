@@ -32,7 +32,8 @@ import (
 	"k8s.io/kubernetes/pkg/fields"
 	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/pkg/types"
+	"k8s.io/kubernetes/pkg/util/wait"
 )
 
 type Tester struct {
@@ -148,18 +149,20 @@ func (t *Tester) TestCreate(valid runtime.Object, setFn SetFunc, getFn GetFunc, 
 // Test updating an object.
 func (t *Tester) TestUpdate(valid runtime.Object, setFn SetFunc, getFn GetFunc, updateFn UpdateFunc, invalidUpdateFn ...UpdateFunc) {
 	t.testUpdateEquals(copyOrDie(valid), setFn, getFn, updateFn)
-	t.testUpdateFailsOnVersionTooOld(copyOrDie(valid), setFn)
+	t.testUpdateFailsOnVersionTooOld(copyOrDie(valid), setFn, getFn)
 	t.testUpdateOnNotFound(copyOrDie(valid))
 	if !t.clusterScope {
 		t.testUpdateRejectsMismatchedNamespace(copyOrDie(valid), setFn)
 	}
 	t.testUpdateInvokesValidation(copyOrDie(valid), setFn, invalidUpdateFn...)
+	t.testUpdateWithWrongUID(copyOrDie(valid), setFn, getFn)
 }
 
 // Test deleting an object.
 func (t *Tester) TestDelete(valid runtime.Object, setFn SetFunc, getFn GetFunc, isNotFoundFn IsErrorFunc) {
 	t.testDeleteNonExist(copyOrDie(valid))
 	t.testDeleteNoGraceful(copyOrDie(valid), setFn, getFn, isNotFoundFn)
+	t.testDeleteWithUID(copyOrDie(valid), setFn, getFn, isNotFoundFn)
 }
 
 // Test gracefully deleting an object.
@@ -426,7 +429,7 @@ func (t *Tester) testUpdateEquals(obj runtime.Object, setFn SetFunc, getFn GetFu
 	}
 }
 
-func (t *Tester) testUpdateFailsOnVersionTooOld(obj runtime.Object, setFn SetFunc) {
+func (t *Tester) testUpdateFailsOnVersionTooOld(obj runtime.Object, setFn SetFunc, getFn GetFunc) {
 	ctx := t.TestContext()
 
 	foo := copyOrDie(obj)
@@ -436,11 +439,16 @@ func (t *Tester) testUpdateFailsOnVersionTooOld(obj runtime.Object, setFn SetFun
 		t.Errorf("unexpected error: %v", err)
 	}
 
-	older := copyOrDie(foo)
+	storedFoo, err := getFn(ctx, foo)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	older := copyOrDie(storedFoo)
 	olderMeta := t.getObjectMetaOrFail(older)
 	olderMeta.ResourceVersion = "1"
 
-	_, _, err := t.storage.(rest.Updater).Update(t.TestContext(), older)
+	_, _, err = t.storage.(rest.Updater).Update(t.TestContext(), older)
 	if err == nil {
 		t.Errorf("Expected an error, but we didn't get one")
 	} else if !errors.IsConflict(err) {
@@ -466,6 +474,26 @@ func (t *Tester) testUpdateInvokesValidation(obj runtime.Object, setFn SetFunc, 
 		if !errors.IsInvalid(err) && !errors.IsBadRequest(err) {
 			t.Errorf("expected invalid or bad request error, got %v", err)
 		}
+	}
+}
+
+func (t *Tester) testUpdateWithWrongUID(obj runtime.Object, setFn SetFunc, getFn GetFunc) {
+	ctx := t.TestContext()
+	foo := copyOrDie(obj)
+	t.setObjectMeta(foo, "foo5")
+	objectMeta := t.getObjectMetaOrFail(foo)
+	objectMeta.UID = types.UID("UID0000")
+	if err := setFn(ctx, foo); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	objectMeta.UID = types.UID("UID1111")
+
+	obj, created, err := t.storage.(rest.Updater).Update(ctx, foo)
+	if created || obj != nil {
+		t.Errorf("expected nil object and no creation for object: %v", foo)
+	}
+	if err == nil || !errors.IsConflict(err) {
+		t.Errorf("unexpected error: %v", err)
 	}
 }
 
@@ -552,6 +580,42 @@ func (t *Tester) testDeleteNonExist(obj runtime.Object) {
 
 }
 
+//  This test the fast-fail path. We test that the precondition gets verified
+//  again before deleting the object in tests of pkg/storage/etcd.
+func (t *Tester) testDeleteWithUID(obj runtime.Object, setFn SetFunc, getFn GetFunc, isNotFoundFn IsErrorFunc) {
+	ctx := t.TestContext()
+
+	foo := copyOrDie(obj)
+	t.setObjectMeta(foo, "foo1")
+	objectMeta := t.getObjectMetaOrFail(foo)
+	objectMeta.UID = types.UID("UID0000")
+	if err := setFn(ctx, foo); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	obj, err := t.storage.(rest.GracefulDeleter).Delete(ctx, objectMeta.Name, api.NewPreconditionDeleteOptions("UID1111"))
+	if err == nil || !errors.IsConflict(err) {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	obj, err = t.storage.(rest.GracefulDeleter).Delete(ctx, objectMeta.Name, api.NewPreconditionDeleteOptions("UID0000"))
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	if !t.returnDeletedObject {
+		if status, ok := obj.(*unversioned.Status); !ok {
+			t.Errorf("expected status of delete, got %v", status)
+		} else if status.Status != unversioned.StatusSuccess {
+			t.Errorf("expected success, got: %v", status.Status)
+		}
+	}
+
+	_, err = getFn(ctx, foo)
+	if err == nil || !isNotFoundFn(err) {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
 // =============================================================================
 // Graceful Deletion tests.
 
@@ -569,7 +633,7 @@ func (t *Tester) testDeleteGracefulHasDefault(obj runtime.Object, setFn SetFunc,
 		t.Errorf("unexpected error: %v", err)
 	}
 	if _, err := getFn(ctx, foo); err != nil {
-		t.Fatalf("did not gracefully delete resource", err)
+		t.Fatalf("did not gracefully delete resource: %v", err)
 	}
 
 	object, err := t.storage.(rest.Getter).Get(ctx, objectMeta.Name)
@@ -596,7 +660,7 @@ func (t *Tester) testDeleteGracefulWithValue(obj runtime.Object, setFn SetFunc, 
 		t.Errorf("unexpected error: %v", err)
 	}
 	if _, err := getFn(ctx, foo); err != nil {
-		t.Fatalf("did not gracefully delete resource", err)
+		t.Fatalf("did not gracefully delete resource: %v", err)
 	}
 
 	object, err := t.storage.(rest.Getter).Get(ctx, objectMeta.Name)
@@ -623,7 +687,7 @@ func (t *Tester) testDeleteGracefulExtend(obj runtime.Object, setFn SetFunc, get
 		t.Errorf("unexpected error: %v", err)
 	}
 	if _, err := getFn(ctx, foo); err != nil {
-		t.Fatalf("did not gracefully delete resource", err)
+		t.Fatalf("did not gracefully delete resource: %v", err)
 	}
 
 	// second delete duration is ignored
@@ -655,7 +719,7 @@ func (t *Tester) testDeleteGracefulImmediate(obj runtime.Object, setFn SetFunc, 
 		t.Errorf("unexpected error: %v", err)
 	}
 	if _, err := getFn(ctx, foo); err != nil {
-		t.Fatalf("did not gracefully delete resource", err)
+		t.Fatalf("did not gracefully delete resource: %v", err)
 	}
 
 	// second delete is immediate, resource is deleted
@@ -668,6 +732,7 @@ func (t *Tester) testDeleteGracefulImmediate(obj runtime.Object, setFn SetFunc, 
 		t.Errorf("unexpected error, object should be deleted immediately: %v", err)
 	}
 	objectMeta = t.getObjectMetaOrFail(out)
+	// the second delete shouldn't update the object, so the objectMeta.DeletionGracePeriodSeconds should eqaul to the value set in the first delete.
 	if objectMeta.DeletionTimestamp == nil || objectMeta.DeletionGracePeriodSeconds == nil || *objectMeta.DeletionGracePeriodSeconds != 0 {
 		t.Errorf("unexpected deleted meta: %#v", objectMeta)
 	}
@@ -864,7 +929,7 @@ func (t *Tester) testListMatchLabels(obj runtime.Object, assignFn AssignFunc) {
 	filtered := []runtime.Object{objs[1]}
 
 	selector := labels.SelectorFromSet(labels.Set(testLabels))
-	options := &unversioned.ListOptions{LabelSelector: unversioned.LabelSelector{selector}}
+	options := &api.ListOptions{LabelSelector: selector}
 	listObj, err := t.storage.(rest.Lister).List(ctx, options)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
@@ -906,7 +971,7 @@ func (t *Tester) testWatchFields(obj runtime.Object, emitFn EmitFunc, fieldsPass
 
 	for _, field := range fieldsPass {
 		for _, action := range actions {
-			options := &unversioned.ListOptions{FieldSelector: unversioned.FieldSelector{field.AsSelector()}, ResourceVersion: "1"}
+			options := &api.ListOptions{FieldSelector: field.AsSelector(), ResourceVersion: "1"}
 			watcher, err := t.storage.(rest.Watcher).Watch(ctx, options)
 			if err != nil {
 				t.Errorf("unexpected error: %v, %v", err, action)
@@ -921,7 +986,7 @@ func (t *Tester) testWatchFields(obj runtime.Object, emitFn EmitFunc, fieldsPass
 				if !ok {
 					t.Errorf("watch channel should be open")
 				}
-			case <-time.After(util.ForeverTestTimeout):
+			case <-time.After(wait.ForeverTestTimeout):
 				t.Errorf("unexpected timeout from result channel")
 			}
 			watcher.Stop()
@@ -930,7 +995,7 @@ func (t *Tester) testWatchFields(obj runtime.Object, emitFn EmitFunc, fieldsPass
 
 	for _, field := range fieldsFail {
 		for _, action := range actions {
-			options := &unversioned.ListOptions{FieldSelector: unversioned.FieldSelector{field.AsSelector()}, ResourceVersion: "1"}
+			options := &api.ListOptions{FieldSelector: field.AsSelector(), ResourceVersion: "1"}
 			watcher, err := t.storage.(rest.Watcher).Watch(ctx, options)
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)
@@ -955,7 +1020,7 @@ func (t *Tester) testWatchLabels(obj runtime.Object, emitFn EmitFunc, labelsPass
 
 	for _, label := range labelsPass {
 		for _, action := range actions {
-			options := &unversioned.ListOptions{LabelSelector: unversioned.LabelSelector{label.AsSelector()}, ResourceVersion: "1"}
+			options := &api.ListOptions{LabelSelector: label.AsSelector(), ResourceVersion: "1"}
 			watcher, err := t.storage.(rest.Watcher).Watch(ctx, options)
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)
@@ -969,7 +1034,7 @@ func (t *Tester) testWatchLabels(obj runtime.Object, emitFn EmitFunc, labelsPass
 				if !ok {
 					t.Errorf("watch channel should be open")
 				}
-			case <-time.After(util.ForeverTestTimeout):
+			case <-time.After(wait.ForeverTestTimeout):
 				t.Errorf("unexpected timeout from result channel")
 			}
 			watcher.Stop()
@@ -978,7 +1043,7 @@ func (t *Tester) testWatchLabels(obj runtime.Object, emitFn EmitFunc, labelsPass
 
 	for _, label := range labelsFail {
 		for _, action := range actions {
-			options := &unversioned.ListOptions{LabelSelector: unversioned.LabelSelector{label.AsSelector()}, ResourceVersion: "1"}
+			options := &api.ListOptions{LabelSelector: label.AsSelector(), ResourceVersion: "1"}
 			watcher, err := t.storage.(rest.Watcher).Watch(ctx, options)
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)

@@ -29,7 +29,7 @@ import (
 	"github.com/rackspace/gophercloud/pagination"
 	"github.com/rackspace/gophercloud/rackspace"
 	"github.com/rackspace/gophercloud/rackspace/compute/v2/servers"
-	"github.com/scalingdata/gcfg"
+	"gopkg.in/gcfg.v1"
 
 	"github.com/golang/glog"
 	"k8s.io/kubernetes/pkg/api"
@@ -344,6 +344,11 @@ func (i *Instances) InstanceID(name string) (string, error) {
 	return "", nil
 }
 
+// InstanceType returns the type of the specified instance.
+func (i *Instances) InstanceType(name string) (string, error) {
+	return "", nil
+}
+
 func (i *Instances) AddSSHKeyToAllInstances(user string, keyData []byte) error {
 	return errors.New("unimplemented")
 }
@@ -367,7 +372,7 @@ func (os *Rackspace) ScrubDNS(nameservers, searches []string) (nsOut, srchOut []
 	return nameservers, searches
 }
 
-func (os *Rackspace) TCPLoadBalancer() (cloudprovider.TCPLoadBalancer, bool) {
+func (os *Rackspace) LoadBalancer() (cloudprovider.LoadBalancer, bool) {
 	return nil, false
 }
 

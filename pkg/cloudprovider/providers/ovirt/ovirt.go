@@ -29,7 +29,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/scalingdata/gcfg"
+	"gopkg.in/gcfg.v1"
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/cloudprovider"
 )
@@ -128,8 +128,8 @@ func (v *OVirtCloud) ScrubDNS(nameservers, searches []string) (nsOut, srchOut []
 	return nameservers, searches
 }
 
-// TCPLoadBalancer returns an implementation of TCPLoadBalancer for oVirt cloud
-func (v *OVirtCloud) TCPLoadBalancer() (cloudprovider.TCPLoadBalancer, bool) {
+// LoadBalancer returns an implementation of LoadBalancer for oVirt cloud
+func (v *OVirtCloud) LoadBalancer() (cloudprovider.LoadBalancer, bool) {
 	return nil, false
 }
 
@@ -191,6 +191,11 @@ func (v *OVirtCloud) InstanceID(name string) (string, error) {
 	// TODO: define a way to identify the provider instance to complete
 	// the format <provider_instance_id>/<instance_id>.
 	return "/" + instance.UUID, err
+}
+
+// InstanceType returns the type of the specified instance.
+func (v *OVirtCloud) InstanceType(name string) (string, error) {
+	return "", nil
 }
 
 func getInstancesFromXml(body io.Reader) (OVirtInstanceMap, error) {

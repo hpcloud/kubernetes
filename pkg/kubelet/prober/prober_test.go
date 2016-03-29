@@ -19,6 +19,8 @@ package prober
 import (
 	"errors"
 	"fmt"
+	"net/http"
+	"reflect"
 	"testing"
 
 	"k8s.io/kubernetes/pkg/api"
@@ -164,12 +166,39 @@ func TestGetTCPAddrParts(t *testing.T) {
 	}
 }
 
+func TestHTTPHeaders(t *testing.T) {
+	testCases := []struct {
+		input  []api.HTTPHeader
+		output http.Header
+	}{
+		{[]api.HTTPHeader{}, http.Header{}},
+		{[]api.HTTPHeader{
+			{"X-Muffins-Or-Cupcakes", "Muffins"},
+		}, http.Header{"X-Muffins-Or-Cupcakes": {"Muffins"}}},
+		{[]api.HTTPHeader{
+			{"X-Muffins-Or-Cupcakes", "Muffins"},
+			{"X-Muffins-Or-Plumcakes", "Muffins!"},
+		}, http.Header{"X-Muffins-Or-Cupcakes": {"Muffins"},
+			"X-Muffins-Or-Plumcakes": {"Muffins!"}}},
+		{[]api.HTTPHeader{
+			{"X-Muffins-Or-Cupcakes", "Muffins"},
+			{"X-Muffins-Or-Cupcakes", "Cupcakes, too"},
+		}, http.Header{"X-Muffins-Or-Cupcakes": {"Muffins", "Cupcakes, too"}}},
+	}
+	for _, test := range testCases {
+		headers := buildHeader(test.input)
+		if !reflect.DeepEqual(test.output, headers) {
+			t.Errorf("Expected %#v, got %#v", test.output, headers)
+		}
+	}
+}
+
 func TestProbe(t *testing.T) {
 	prober := &prober{
 		refManager: kubecontainer.NewRefManager(),
 		recorder:   &record.FakeRecorder{},
 	}
-	containerID := kubecontainer.ContainerID{"test", "foobar"}
+	containerID := kubecontainer.ContainerID{Type: "test", ID: "foobar"}
 
 	execProbe := &api.Probe{
 		Handler: api.Handler{

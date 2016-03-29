@@ -23,11 +23,10 @@ import (
 	"time"
 
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/client/cache"
 	"k8s.io/kubernetes/pkg/controller/framework"
 	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/pkg/util/flowcontrol"
 	"k8s.io/kubernetes/pkg/util/sets"
 	"k8s.io/kubernetes/pkg/watch"
 
@@ -40,8 +39,8 @@ func (d durations) Len() int           { return len(d) }
 func (d durations) Less(i, j int) bool { return d[i] < d[j] }
 func (d durations) Swap(i, j int)      { d[i], d[j] = d[j], d[i] }
 
-var _ = Describe("Service endpoints latency", func() {
-	f := NewFramework("svc-latency")
+var _ = KubeDescribe("Service endpoints latency", func() {
+	f := NewDefaultFramework("svc-latency")
 
 	It("should not be very high [Conformance]", func() {
 		const (
@@ -67,7 +66,7 @@ var _ = Describe("Service endpoints latency", func() {
 
 		// Turn off rate limiting--it interferes with our measurements.
 		oldThrottle := f.Client.RESTClient.Throttle
-		f.Client.RESTClient.Throttle = util.NewFakeRateLimiter()
+		f.Client.RESTClient.Throttle = flowcontrol.NewFakeAlwaysRateLimiter()
 		defer func() { f.Client.RESTClient.Throttle = oldThrottle }()
 
 		failing := sets.NewString()
@@ -277,10 +276,10 @@ func (eq *endpointQueries) added(e *api.Endpoints) {
 func startEndpointWatcher(f *Framework, q *endpointQueries) {
 	_, controller := framework.NewInformer(
 		&cache.ListWatch{
-			ListFunc: func() (runtime.Object, error) {
-				return f.Client.Endpoints(f.Namespace.Name).List(unversioned.ListOptions{})
+			ListFunc: func(options api.ListOptions) (runtime.Object, error) {
+				return f.Client.Endpoints(f.Namespace.Name).List(options)
 			},
-			WatchFunc: func(options unversioned.ListOptions) (watch.Interface, error) {
+			WatchFunc: func(options api.ListOptions) (watch.Interface, error) {
 				return f.Client.Endpoints(f.Namespace.Name).Watch(options)
 			},
 		},

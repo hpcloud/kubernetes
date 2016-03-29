@@ -22,8 +22,8 @@ import (
 	"path"
 
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/latest"
 	"k8s.io/kubernetes/pkg/api/unversioned"
+	"k8s.io/kubernetes/pkg/apimachinery/registered"
 	client "k8s.io/kubernetes/pkg/client/unversioned"
 
 	. "github.com/onsi/ginkgo"
@@ -31,8 +31,8 @@ import (
 
 //TODO : Consolidate this code with the code for emptyDir.
 //This will require some smart.
-var _ = Describe("hostPath", func() {
-	framework := NewFramework("hostpath")
+var _ = KubeDescribe("hostPath", func() {
+	framework := NewDefaultFramework("hostpath")
 	var c *client.Client
 	var namespace *api.Namespace
 
@@ -61,7 +61,8 @@ var _ = Describe("hostPath", func() {
 			namespace.Name)
 	})
 
-	It("should support r/w [Conformance]", func() {
+	// This test requires mounting a folder into a container with write privileges.
+	It("should support r/w", func() {
 		volumePath := "/test-volume"
 		filePath := path.Join(volumePath, "test-file")
 		retryDuration := 180
@@ -111,7 +112,7 @@ func testPodWithHostVol(path string, source *api.HostPathVolumeSource) *api.Pod 
 	return &api.Pod{
 		TypeMeta: unversioned.TypeMeta{
 			Kind:       "Pod",
-			APIVersion: latest.GroupOrDie("").GroupVersion.Version,
+			APIVersion: registered.GroupOrDie(api.GroupName).GroupVersion.String(),
 		},
 		ObjectMeta: api.ObjectMeta{
 			Name: podName,

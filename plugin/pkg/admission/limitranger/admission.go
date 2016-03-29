@@ -21,14 +21,17 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"time"
+
+	"github.com/hashicorp/golang-lru"
+
+	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 
 	"k8s.io/kubernetes/pkg/admission"
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/meta"
 	"k8s.io/kubernetes/pkg/api/resource"
-	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/client/cache"
-	client "k8s.io/kubernetes/pkg/client/unversioned"
 	"k8s.io/kubernetes/pkg/runtime"
 	utilerrors "k8s.io/kubernetes/pkg/util/errors"
 	"k8s.io/kubernetes/pkg/watch"
@@ -39,24 +42,33 @@ const (
 )
 
 func init() {
-	admission.RegisterPlugin("LimitRanger", func(client client.Interface, config io.Reader) (admission.Interface, error) {
-		return NewLimitRanger(client, Limit), nil
+	admission.RegisterPlugin("LimitRanger", func(client clientset.Interface, config io.Reader) (admission.Interface, error) {
+		return NewLimitRanger(client, &DefaultLimitRangerActions{})
 	})
 }
 
 // limitRanger enforces usage limits on a per resource basis in the namespace
 type limitRanger struct {
 	*admission.Handler
-	client    client.Interface
-	limitFunc LimitFunc
-	indexer   cache.Indexer
+	client  clientset.Interface
+	actions LimitRangerActions
+	indexer cache.Indexer
+
+	// liveLookups holds the last few live lookups we've done to help ammortize cost on repeated lookup failures.
+	// This let's us handle the case of latent caches, by looking up actual results for a namespace on cache miss/no results.
+	// We track the lookup result here so that for repeated requests, we don't look it up very often.
+	liveLookupCache *lru.Cache
+	liveTTL         time.Duration
+}
+
+type liveLookupEntry struct {
+	expiry time.Time
+	items  []*api.LimitRange
 }
 
 // Admit admits resources into cluster that do not violate any defined LimitRange in the namespace
 func (l *limitRanger) Admit(a admission.Attributes) (err error) {
-
-	// Ignore all calls to subresources
-	if a.GetSubresource() != "" {
+	if !l.actions.SupportsAttributes(a) {
 		return nil
 	}
 
@@ -79,14 +91,44 @@ func (l *limitRanger) Admit(a admission.Attributes) (err error) {
 	if err != nil {
 		return admission.NewForbidden(a, fmt.Errorf("Unable to %s %v at this time because there was an error enforcing limit ranges", a.GetOperation(), a.GetResource()))
 	}
+
+	// if there are no items held in our indexer, check our live-lookup LRU, if that misses, do the live lookup to prime it.
 	if len(items) == 0 {
-		return nil
+		lruItemObj, ok := l.liveLookupCache.Get(a.GetNamespace())
+		if !ok || lruItemObj.(liveLookupEntry).expiry.Before(time.Now()) {
+			// TODO: If there are multiple operations at the same time and cache has just expired,
+			// this may cause multiple List operations being issued at the same time.
+			// If there is already in-flight List() for a given namespace, we should wait until
+			// it is finished and cache is updated instead of doing the same, also to avoid
+			// throttling - see #22422 for details.
+			liveList, err := l.client.Core().LimitRanges(a.GetNamespace()).List(api.ListOptions{})
+			if err != nil {
+				return admission.NewForbidden(a, err)
+			}
+			newEntry := liveLookupEntry{expiry: time.Now().Add(l.liveTTL)}
+			for i := range liveList.Items {
+				newEntry.items = append(newEntry.items, &liveList.Items[i])
+			}
+			l.liveLookupCache.Add(a.GetNamespace(), newEntry)
+			lruItemObj = newEntry
+		}
+		lruEntry := lruItemObj.(liveLookupEntry)
+
+		for i := range lruEntry.items {
+			items = append(items, lruEntry.items[i])
+		}
+
 	}
 
 	// ensure it meets each prescribed min/max
 	for i := range items {
 		limitRange := items[i].(*api.LimitRange)
-		err = l.limitFunc(limitRange, a.GetResource().Resource, a.GetObject())
+
+		if !l.actions.SupportsLimit(limitRange) {
+			continue
+		}
+
+		err = l.actions.Limit(limitRange, a.GetResource().Resource, a.GetObject())
 		if err != nil {
 			return admission.NewForbidden(a, err)
 		}
@@ -95,23 +137,35 @@ func (l *limitRanger) Admit(a admission.Attributes) (err error) {
 }
 
 // NewLimitRanger returns an object that enforces limits based on the supplied limit function
-func NewLimitRanger(client client.Interface, limitFunc LimitFunc) admission.Interface {
+func NewLimitRanger(client clientset.Interface, actions LimitRangerActions) (admission.Interface, error) {
+	liveLookupCache, err := lru.New(10000)
+	if err != nil {
+		return nil, err
+	}
+
 	lw := &cache.ListWatch{
-		ListFunc: func() (runtime.Object, error) {
-			return client.LimitRanges(api.NamespaceAll).List(unversioned.ListOptions{})
+		ListFunc: func(options api.ListOptions) (runtime.Object, error) {
+			return client.Core().LimitRanges(api.NamespaceAll).List(options)
 		},
-		WatchFunc: func(options unversioned.ListOptions) (watch.Interface, error) {
-			return client.LimitRanges(api.NamespaceAll).Watch(options)
+		WatchFunc: func(options api.ListOptions) (watch.Interface, error) {
+			return client.Core().LimitRanges(api.NamespaceAll).Watch(options)
 		},
 	}
 	indexer, reflector := cache.NewNamespaceKeyedIndexerAndReflector(lw, &api.LimitRange{}, 0)
 	reflector.Run()
-	return &limitRanger{
-		Handler:   admission.NewHandler(admission.Create, admission.Update),
-		client:    client,
-		limitFunc: limitFunc,
-		indexer:   indexer,
+
+	if actions == nil {
+		actions = &DefaultLimitRangerActions{}
 	}
+
+	return &limitRanger{
+		Handler:         admission.NewHandler(admission.Create, admission.Update),
+		client:          client,
+		actions:         actions,
+		indexer:         indexer,
+		liveLookupCache: liveLookupCache,
+		liveTTL:         time.Duration(30 * time.Second),
+	}, nil
 }
 
 // Min returns the lesser of its 2 arguments
@@ -128,17 +182,6 @@ func Max(a int64, b int64) int64 {
 		return a
 	}
 	return b
-}
-
-// Limit enforces resource requirements of incoming resources against enumerated constraints
-// on the LimitRange.  It may modify the incoming object to apply default resource requirements
-// if not specified, and enumerated on the LimitRange
-func Limit(limitRange *api.LimitRange, resourceName string, obj runtime.Object) error {
-	switch resourceName {
-	case "pods":
-		return PodLimitFunc(limitRange, obj.(*api.Pod))
-	}
-	return nil
 }
 
 // defaultContainerResourceRequirements returns the default requirements for a container
@@ -330,6 +373,38 @@ func sum(inputs []api.ResourceList) api.ResourceList {
 		}
 	}
 	return result
+}
+
+// DefaultLimitRangerActions is the default implementatation of LimitRangerActions.
+type DefaultLimitRangerActions struct{}
+
+// ensure DefaultLimitRangerActions implements the LimitRangerActions interface.
+var _ LimitRangerActions = &DefaultLimitRangerActions{}
+
+// Limit enforces resource requirements of incoming resources against enumerated constraints
+// on the LimitRange.  It may modify the incoming object to apply default resource requirements
+// if not specified, and enumerated on the LimitRange
+func (d *DefaultLimitRangerActions) Limit(limitRange *api.LimitRange, resourceName string, obj runtime.Object) error {
+	switch resourceName {
+	case "pods":
+		return PodLimitFunc(limitRange, obj.(*api.Pod))
+	}
+	return nil
+}
+
+// SupportsAttributes ignores all calls that do not deal with pod resources since that is
+// all this supports now.  Also ignores any call that has a subresource defined.
+func (d *DefaultLimitRangerActions) SupportsAttributes(a admission.Attributes) bool {
+	if a.GetSubresource() != "" {
+		return false
+	}
+
+	return a.GetKind() == api.Kind("Pod")
+}
+
+// SupportsLimit always returns true.
+func (d *DefaultLimitRangerActions) SupportsLimit(limitRange *api.LimitRange) bool {
+	return true
 }
 
 // PodLimitFunc enforces resource requirements enumerated by the pod against

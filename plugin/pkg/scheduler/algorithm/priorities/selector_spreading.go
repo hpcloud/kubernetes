@@ -17,33 +17,71 @@ limitations under the License.
 package priorities
 
 import (
+	"sync"
+
 	"github.com/golang/glog"
 	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/labels"
+	utilruntime "k8s.io/kubernetes/pkg/util/runtime"
 	"k8s.io/kubernetes/plugin/pkg/scheduler/algorithm"
 	schedulerapi "k8s.io/kubernetes/plugin/pkg/scheduler/api"
+	"k8s.io/kubernetes/plugin/pkg/scheduler/schedulercache"
 )
 
+// The maximum priority value to give to a node
+// Prioritiy values range from 0-maxPriority
+const maxPriority = 10
+
+// When zone information is present, give 2/3 of the weighting to zone spreading, 1/3 to node spreading
+// TODO: Any way to justify this weighting?
+const zoneWeighting = 2.0 / 3.0
+
 type SelectorSpread struct {
+	podLister        algorithm.PodLister
 	serviceLister    algorithm.ServiceLister
 	controllerLister algorithm.ControllerLister
+	replicaSetLister algorithm.ReplicaSetLister
 }
 
-func NewSelectorSpreadPriority(serviceLister algorithm.ServiceLister, controllerLister algorithm.ControllerLister) algorithm.PriorityFunction {
+func NewSelectorSpreadPriority(podLister algorithm.PodLister, serviceLister algorithm.ServiceLister, controllerLister algorithm.ControllerLister, replicaSetLister algorithm.ReplicaSetLister) algorithm.PriorityFunction {
 	selectorSpread := &SelectorSpread{
+		podLister:        podLister,
 		serviceLister:    serviceLister,
 		controllerLister: controllerLister,
+		replicaSetLister: replicaSetLister,
 	}
 	return selectorSpread.CalculateSpreadPriority
 }
 
-// CalculateSpreadPriority spreads pods by minimizing the number of pods belonging to the same service or replication controller. It counts number of pods that run under
-// Services or RCs as the pod being scheduled and tries to minimize the number of conflicts. I.e. pushes scheduler towards a Node where there's a smallest number of
-// pods which match the same selectors of Services and RCs as current pod.
-func (s *SelectorSpread) CalculateSpreadPriority(pod *api.Pod, podLister algorithm.PodLister, nodeLister algorithm.NodeLister) (schedulerapi.HostPriorityList, error) {
-	var maxCount int
-	var nsPods []*api.Pod
+// Helper function that builds a string identifier that is unique per failure-zone
+// Returns empty-string for no zone
+func getZoneKey(node *api.Node) string {
+	labels := node.Labels
+	if labels == nil {
+		return ""
+	}
 
+	region, _ := labels[unversioned.LabelZoneRegion]
+	failureDomain, _ := labels[unversioned.LabelZoneFailureDomain]
+
+	if region == "" && failureDomain == "" {
+		return ""
+	}
+
+	// We include the null character just in case region or failureDomain has a colon
+	// (We do assume there's no null characters in a region or failureDomain)
+	// As a nice side-benefit, the null character is not printed by fmt.Print or glog
+	return region + ":\x00:" + failureDomain
+}
+
+// CalculateSpreadPriority spreads pods across hosts and zones, considering pods belonging to the same service or replication controller.
+// When a pod is scheduled, it looks for services or RCs that match the pod, then finds existing pods that match those selectors.
+// It favors nodes that have fewer existing matching pods.
+// i.e. it pushes the scheduler towards a node where there's the smallest number of
+// pods which match the same service selectors or RC selectors as the pod being scheduled.
+// Where zone information is included on the nodes, it favors nodes in zones with fewer existing matching pods.
+func (s *SelectorSpread) CalculateSpreadPriority(pod *api.Pod, nodeNameToInfo map[string]*schedulercache.NodeInfo, nodeLister algorithm.NodeLister) (schedulerapi.HostPriorityList, error) {
 	selectors := make([]labels.Selector, 0)
 	services, err := s.serviceLister.GetPodServices(pod)
 	if err == nil {
@@ -51,22 +89,17 @@ func (s *SelectorSpread) CalculateSpreadPriority(pod *api.Pod, podLister algorit
 			selectors = append(selectors, labels.SelectorFromSet(service.Spec.Selector))
 		}
 	}
-	controllers, err := s.controllerLister.GetPodControllers(pod)
+	rcs, err := s.controllerLister.GetPodControllers(pod)
 	if err == nil {
-		for _, controller := range controllers {
-			selectors = append(selectors, labels.SelectorFromSet(controller.Spec.Selector))
+		for _, rc := range rcs {
+			selectors = append(selectors, labels.SelectorFromSet(rc.Spec.Selector))
 		}
 	}
-
-	if len(selectors) > 0 {
-		pods, err := podLister.List(labels.Everything())
-		if err != nil {
-			return nil, err
-		}
-		// consider only the pods that belong to the same namespace
-		for _, nsPod := range pods {
-			if nsPod.Namespace == pod.Namespace {
-				nsPods = append(nsPods, nsPod)
+	rss, err := s.replicaSetLister.GetPodReplicaSets(pod)
+	if err == nil {
+		for _, rs := range rss {
+			if selector, err := unversioned.LabelSelectorAsSelector(rs.Spec.Selector); err == nil {
+				selectors = append(selectors, selector)
 			}
 		}
 	}
@@ -76,35 +109,124 @@ func (s *SelectorSpread) CalculateSpreadPriority(pod *api.Pod, podLister algorit
 		return nil, err
 	}
 
-	counts := map[string]int{}
-	if len(nsPods) > 0 {
-		for _, pod := range nsPods {
-			matches := false
-			for _, selector := range selectors {
-				if selector.Matches(labels.Set(pod.ObjectMeta.Labels)) {
-					matches = true
-					break
+	// Count similar pods by node
+	countsByNodeName := map[string]int{}
+	countsByNodeNameLock := sync.Mutex{}
+
+	if len(selectors) > 0 {
+		// Create a number of go-routines that will be computing number
+		// of "similar" pods for given nodes.
+		workers := 16
+		toProcess := make(chan string, len(nodes.Items))
+		for i := range nodes.Items {
+			toProcess <- nodes.Items[i].Name
+		}
+		close(toProcess)
+
+		wg := sync.WaitGroup{}
+		wg.Add(workers)
+		for i := 0; i < workers; i++ {
+			go func() {
+				defer utilruntime.HandleCrash()
+				defer wg.Done()
+				for {
+					nodeName, ok := <-toProcess
+					if !ok {
+						return
+					}
+					count := 0
+					for _, nodePod := range nodeNameToInfo[nodeName].Pods() {
+						if pod.Namespace != nodePod.Namespace {
+							continue
+						}
+						// When we are replacing a failed pod, we often see the previous
+						// deleted version while scheduling the replacement.
+						// Ignore the previous deleted version for spreading purposes
+						// (it can still be considered for resource restrictions etc.)
+						if nodePod.DeletionTimestamp != nil {
+							glog.V(4).Infof("skipping pending-deleted pod: %s/%s", nodePod.Namespace, nodePod.Name)
+							continue
+						}
+						matches := false
+						for _, selector := range selectors {
+							if selector.Matches(labels.Set(nodePod.ObjectMeta.Labels)) {
+								matches = true
+								break
+							}
+						}
+						if matches {
+							count++
+						}
+					}
+
+					func() {
+						countsByNodeNameLock.Lock()
+						defer countsByNodeNameLock.Unlock()
+						countsByNodeName[nodeName] = count
+					}()
 				}
-			}
-			if matches {
-				counts[pod.Spec.NodeName]++
-				// Compute the maximum number of pods hosted on any node
-				if counts[pod.Spec.NodeName] > maxCount {
-					maxCount = counts[pod.Spec.NodeName]
-				}
-			}
+			}()
+		}
+		wg.Wait()
+	}
+
+	// Aggregate by-node information
+	// Compute the maximum number of pods hosted on any node
+	maxCountByNodeName := 0
+	for _, count := range countsByNodeName {
+		if count > maxCountByNodeName {
+			maxCountByNodeName = count
+		}
+	}
+
+	// Count similar pods by zone, if zone information is present
+	countsByZone := map[string]int{}
+	for i := range nodes.Items {
+		node := &nodes.Items[i]
+
+		count, found := countsByNodeName[node.Name]
+		if !found {
+			continue
+		}
+
+		zoneId := getZoneKey(node)
+		if zoneId == "" {
+			continue
+		}
+
+		countsByZone[zoneId] += count
+	}
+
+	// Aggregate by-zone information
+	// Compute the maximum number of pods hosted in any zone
+	haveZones := len(countsByZone) != 0
+	maxCountByZone := 0
+	for _, count := range countsByZone {
+		if count > maxCountByZone {
+			maxCountByZone = count
 		}
 	}
 
 	result := []schedulerapi.HostPriority{}
-	//score int - scale of 0-10
-	// 0 being the lowest priority and 10 being the highest
-	for _, node := range nodes.Items {
-		// initializing to the default/max node score of 10
-		fScore := float32(10)
-		if maxCount > 0 {
-			fScore = 10 * (float32(maxCount-counts[node.Name]) / float32(maxCount))
+	//score int - scale of 0-maxPriority
+	// 0 being the lowest priority and maxPriority being the highest
+	for i := range nodes.Items {
+		node := &nodes.Items[i]
+		// initializing to the default/max node score of maxPriority
+		fScore := float32(maxPriority)
+		if maxCountByNodeName > 0 {
+			fScore = maxPriority * (float32(maxCountByNodeName-countsByNodeName[node.Name]) / float32(maxCountByNodeName))
 		}
+
+		// If there is zone information present, incorporate it
+		if haveZones {
+			zoneId := getZoneKey(node)
+			if zoneId != "" {
+				zoneScore := maxPriority * (float32(maxCountByZone-countsByZone[zoneId]) / float32(maxCountByZone))
+				fScore = (fScore * (1.0 - zoneWeighting)) + (zoneWeighting * zoneScore)
+			}
+		}
+
 		result = append(result, schedulerapi.HostPriority{Host: node.Name, Score: int(fScore)})
 		glog.V(10).Infof(
 			"%v -> %v: SelectorSpreadPriority, Score: (%d)", pod.Name, node.Name, int(fScore),
@@ -114,12 +236,14 @@ func (s *SelectorSpread) CalculateSpreadPriority(pod *api.Pod, podLister algorit
 }
 
 type ServiceAntiAffinity struct {
+	podLister     algorithm.PodLister
 	serviceLister algorithm.ServiceLister
 	label         string
 }
 
-func NewServiceAntiAffinityPriority(serviceLister algorithm.ServiceLister, label string) algorithm.PriorityFunction {
+func NewServiceAntiAffinityPriority(podLister algorithm.PodLister, serviceLister algorithm.ServiceLister, label string) algorithm.PriorityFunction {
 	antiAffinity := &ServiceAntiAffinity{
+		podLister:     podLister,
 		serviceLister: serviceLister,
 		label:         label,
 	}
@@ -129,7 +253,7 @@ func NewServiceAntiAffinityPriority(serviceLister algorithm.ServiceLister, label
 // CalculateAntiAffinityPriority spreads pods by minimizing the number of pods belonging to the same service
 // on machines with the same value for a particular label.
 // The label to be considered is provided to the struct (ServiceAntiAffinity).
-func (s *ServiceAntiAffinity) CalculateAntiAffinityPriority(pod *api.Pod, podLister algorithm.PodLister, nodeLister algorithm.NodeLister) (schedulerapi.HostPriorityList, error) {
+func (s *ServiceAntiAffinity) CalculateAntiAffinityPriority(pod *api.Pod, nodeNameToInfo map[string]*schedulercache.NodeInfo, nodeLister algorithm.NodeLister) (schedulerapi.HostPriorityList, error) {
 	var nsServicePods []*api.Pod
 
 	services, err := s.serviceLister.GetPodServices(pod)
@@ -137,7 +261,7 @@ func (s *ServiceAntiAffinity) CalculateAntiAffinityPriority(pod *api.Pod, podLis
 		// just use the first service and get the other pods within the service
 		// TODO: a separate predicate can be created that tries to handle all services for the pod
 		selector := labels.SelectorFromSet(services[0].Spec.Selector)
-		pods, err := podLister.List(selector)
+		pods, err := s.podLister.List(selector)
 		if err != nil {
 			return nil, err
 		}
@@ -177,13 +301,13 @@ func (s *ServiceAntiAffinity) CalculateAntiAffinityPriority(pod *api.Pod, podLis
 
 	numServicePods := len(nsServicePods)
 	result := []schedulerapi.HostPriority{}
-	//score int - scale of 0-10
-	// 0 being the lowest priority and 10 being the highest
+	//score int - scale of 0-maxPriority
+	// 0 being the lowest priority and maxPriority being the highest
 	for node := range labeledNodes {
-		// initializing to the default/max node score of 10
-		fScore := float32(10)
+		// initializing to the default/max node score of maxPriority
+		fScore := float32(maxPriority)
 		if numServicePods > 0 {
-			fScore = 10 * (float32(numServicePods-podCounts[labeledNodes[node]]) / float32(numServicePods))
+			fScore = maxPriority * (float32(numServicePods-podCounts[labeledNodes[node]]) / float32(numServicePods))
 		}
 		result = append(result, schedulerapi.HostPriority{Host: node, Score: int(fScore)})
 	}

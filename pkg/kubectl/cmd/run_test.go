@@ -28,9 +28,10 @@ import (
 	"github.com/spf13/cobra"
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/testapi"
-	client "k8s.io/kubernetes/pkg/client/unversioned"
+	"k8s.io/kubernetes/pkg/client/restclient"
 	"k8s.io/kubernetes/pkg/client/unversioned/fake"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
+	"k8s.io/kubernetes/pkg/runtime"
 	"k8s.io/kubernetes/pkg/util/intstr"
 )
 
@@ -156,9 +157,10 @@ func TestRunArgsFollowDashRules(t *testing.T) {
 			}),
 		}
 		tf.Namespace = "test"
-		tf.ClientConfig = &client.Config{}
+		tf.ClientConfig = &restclient.Config{}
 		cmd := NewCmdRun(f, os.Stdin, os.Stdout, os.Stderr)
 		cmd.Flags().Set("image", "nginx")
+		cmd.Flags().Set("generator", "run/v1")
 		err := Run(f, os.Stdin, os.Stdout, os.Stderr, cmd, test.args, test.argsLenAtDash)
 		if test.expectError && err == nil {
 			t.Errorf("unexpected non-error (%s)", test.name)
@@ -263,7 +265,7 @@ func TestGenerateService(t *testing.T) {
 	for _, test := range tests {
 		sawPOST := false
 		f, tf, codec := NewAPIFactory()
-		tf.ClientConfig = &client.Config{GroupVersion: testapi.Default.GroupVersion()}
+		tf.ClientConfig = &restclient.Config{ContentConfig: restclient.ContentConfig{GroupVersion: testapi.Default.GroupVersion()}}
 		tf.Client = &fake.RESTClient{
 			Codec: codec,
 			Client: fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
@@ -278,7 +280,7 @@ func TestGenerateService(t *testing.T) {
 					}
 					defer req.Body.Close()
 					svc := &api.Service{}
-					if err := codec.DecodeInto(data, svc); err != nil {
+					if err := runtime.DecodeInto(codec, data, svc); err != nil {
 						t.Errorf("unexpected error: %v", err)
 						t.FailNow()
 					}
@@ -299,6 +301,7 @@ func TestGenerateService(t *testing.T) {
 		cmd := &cobra.Command{}
 		cmd.Flags().String("output", "", "")
 		cmd.Flags().Bool(cmdutil.ApplyAnnotationsFlag, false, "")
+		cmd.Flags().Bool("record", false, "Record current kubectl command in the resource annotation.")
 		addRunFlags(cmd)
 
 		if !test.expectPOST {
@@ -322,7 +325,7 @@ func TestGenerateService(t *testing.T) {
 			t.Errorf("unexpected error: %v", err)
 		}
 		if test.expectPOST != sawPOST {
-			t.Error("expectPost: %v, sawPost: %v", test.expectPOST, sawPOST)
+			t.Errorf("expectPost: %v, sawPost: %v", test.expectPOST, sawPOST)
 		}
 	}
 }

@@ -18,9 +18,10 @@
 If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
+<!-- TAG RELEASE_LINK, added by the munger automatically -->
 <strong>
 The latest release of this document can be found
-[here](http://releases.k8s.io/release-1.1/docs/devel/pull-requests.md).
+[here](http://releases.k8s.io/release-1.2/docs/devel/pull-requests.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -30,39 +31,81 @@ Documentation for other releases can be found at
 <!-- END STRIP_FOR_RELEASE -->
 
 <!-- END MUNGE: UNVERSIONED_WARNING -->
-Pull Request Process
-====================
 
-An overview of how we will manage old or out-of-date pull requests.
+<!-- BEGIN MUNGE: GENERATED_TOC -->
 
-Process
--------
+- [Pull Request Process](#pull-request-process)
+- [Life of a Pull Request](#life-of-a-pull-request)
+  - [Before sending a pull request](#before-sending-a-pull-request)
+  - [Release Notes](#release-notes)
+  - [Visual overview](#visual-overview)
+- [Other notes](#other-notes)
+- [Automation](#automation)
 
-We will close any pull requests older than two weeks.
+<!-- END MUNGE: GENERATED_TOC -->
 
-Exceptions can be made for PRs that have active review comments, or that are awaiting other dependent PRs.  Closed pull requests are easy to recreate, and little work is lost by closing a pull request that subsequently needs to be reopened.
+# Pull Request Process
 
-We want to limit the total number of PRs in flight to:
-* Maintain a clean project
-* Remove old PRs that would be difficult to rebase as the underlying code has changed over time
-* Encourage code velocity
+An overview of how pull requests are managed for kubernetes. This document
+assumes the reader has already followed the [development guide](development.md)
+to set up their environment.
 
-Life of a Pull Request
-----------------------
+# Life of a Pull Request
 
 Unless in the last few weeks of a milestone when we need to reduce churn and stabilize, we aim to be always accepting pull requests.
 
-Either the [on call](https://github.com/kubernetes/kubernetes/wiki/Kubernetes-on-call-rotations) manually or the [github "munger"](https://github.com/kubernetes/contrib/tree/master/mungegithub) submit-queue plugin automatically will manage merging PRs.
+Either the [on call](on-call-rotations.md) manually or the [github "munger"](https://github.com/kubernetes/contrib/tree/master/mungegithub) submit-queue plugin automatically will manage merging PRs.
 
 There are several requirements for the submit-queue to work:
 * Author must have signed CLA ("cla: yes" label added to PR)
 * No changes can be made since last lgtm label was applied
-* k8s-bot must have reported the GCE E2E build and test steps passed (Travis, Shippable and Jenkins build)
+* k8s-bot must have reported the GCE E2E build and test steps passed (Travis, Jenkins unit/integration, Jenkins e2e)
 
 Additionally, for infrequent or new contributors, we require the on call to apply the "ok-to-merge" label manually.  This is gated by the [whitelist](https://github.com/kubernetes/contrib/blob/master/mungegithub/whitelist.txt).
 
-Automation
-----------
+## Before sending a pull request
+
+The following will save time for both you and your reviewer:
+
+* Enable [pre-commit hooks](development.md#committing-changes-to-your-fork) and verify they pass.
+* Verify `hack/verify-generated-docs.sh` passes.
+* Verify `hack/test-go.sh` passes.
+
+## Release Notes
+
+All pull requests are initiated with a `needs-release-note` label.
+There are many `release-note-*` label options, including `release-note-none`.
+If your PR does not require any visibility at release time, you may use a
+`release-note-none` label.  Otherwise, please choose a `release-note-*` label
+that fits your PR.
+
+Additionally, `release-note-none` is not allowed on PRs on release branches.
+
+Finally, ensure your PR title is the release note you want published at relase
+time.
+
+## Visual overview
+
+![PR workflow](pr_workflow.png)
+
+# Other notes
+
+Pull requests that are purely support questions will be closed and
+redirected to [stackoverflow](http://stackoverflow.com/questions/tagged/kubernetes).
+We do this to consolidate help/support questions into a single channel,
+improve efficiency in responding to requests and make FAQs easier
+to find.
+
+Pull requests older than 2 weeks will be closed.  Exceptions can be made
+for PRs that have active review comments, or that are awaiting other dependent PRs.
+Closed pull requests are easy to recreate, and little work is lost by closing a pull
+request that subsequently needs to be reopened. We want to limit the total number of PRs in flight to:
+* Maintain a clean project
+* Remove old PRs that would be difficult to rebase as the underlying code has changed over time
+* Encourage code velocity
+
+
+# Automation
 
 We use a variety of automation to manage pull requests.  This automation is described in detail
 [elsewhere.](automation.md)

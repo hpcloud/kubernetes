@@ -27,8 +27,9 @@ import (
 	"k8s.io/kubernetes/pkg/client/record"
 	"k8s.io/kubernetes/pkg/kubelet/cadvisor"
 	"k8s.io/kubernetes/pkg/kubelet/container"
-	"k8s.io/kubernetes/pkg/util"
+	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/util/sets"
+	"k8s.io/kubernetes/pkg/util/wait"
 )
 
 // Manages lifecycle of all images.
@@ -41,6 +42,8 @@ type imageManager interface {
 
 	// Start async garbage collection of images.
 	Start() error
+
+	GetImageList() ([]kubecontainer.Image, error)
 
 	// TODO(vmarmol): Have this subsume pulls as well.
 }
@@ -55,6 +58,9 @@ type ImageGCPolicy struct {
 	// Any usage below this threshold will never trigger garbage collection.
 	// This is the lowest threshold we will try to garbage collect to.
 	LowThresholdPercent int
+
+	// Minimum age at which a image can be garbage collected.
+	MinAge time.Duration
 }
 
 type realImageManager struct {
@@ -84,7 +90,7 @@ type realImageManager struct {
 // Information about the images we track.
 type imageRecord struct {
 	// Time when this image was first detected.
-	detected time.Time
+	firstDetected time.Time
 
 	// Time when we last saw this image being used.
 	lastUsed time.Time
@@ -118,7 +124,7 @@ func newImageManager(runtime container.Runtime, cadvisorInterface cadvisor.Inter
 }
 
 func (im *realImageManager) Start() error {
-	go util.Until(func() {
+	go wait.Until(func() {
 		// Initial detection make detected time "unknown" in the past.
 		var ts time.Time
 		if im.initialized {
@@ -130,12 +136,21 @@ func (im *realImageManager) Start() error {
 		} else {
 			im.initialized = true
 		}
-	}, 5*time.Minute, util.NeverStop)
+	}, 5*time.Minute, wait.NeverStop)
 
 	return nil
 }
 
-func (im *realImageManager) detectImages(detected time.Time) error {
+// Get a list of images on this node
+func (im *realImageManager) GetImageList() ([]kubecontainer.Image, error) {
+	images, err := im.runtime.ListImages()
+	if err != nil {
+		return nil, err
+	}
+	return images, nil
+}
+
+func (im *realImageManager) detectImages(detectTime time.Time) error {
 	images, err := im.runtime.ListImages()
 	if err != nil {
 		return err
@@ -164,7 +179,7 @@ func (im *realImageManager) detectImages(detected time.Time) error {
 		// New image, set it as detected now.
 		if _, ok := im.imageRecords[image.ID]; !ok {
 			im.imageRecords[image.ID] = &imageRecord{
-				detected: detected,
+				firstDetected: detectTime,
 			}
 		}
 
@@ -207,7 +222,7 @@ func (im *realImageManager) GarbageCollect() error {
 	if usagePercent >= im.policy.HighThresholdPercent {
 		amountToFree := usage - (int64(im.policy.LowThresholdPercent) * capacity / 100)
 		glog.Infof("[ImageManager]: Disk usage on %q (%s) is at %d%% which is over the high threshold (%d%%). Trying to free %d bytes", fsInfo.Device, fsInfo.Mountpoint, usagePercent, im.policy.HighThresholdPercent, amountToFree)
-		freed, err := im.freeSpace(amountToFree)
+		freed, err := im.freeSpace(amountToFree, time.Now())
 		if err != nil {
 			return err
 		}
@@ -228,9 +243,8 @@ func (im *realImageManager) GarbageCollect() error {
 // bytes freed is always returned.
 // Note that error may be nil and the number of bytes free may be less
 // than bytesToFree.
-func (im *realImageManager) freeSpace(bytesToFree int64) (int64, error) {
-	startTime := time.Now()
-	err := im.detectImages(startTime)
+func (im *realImageManager) freeSpace(bytesToFree int64, freeTime time.Time) (int64, error) {
+	err := im.detectImages(freeTime)
 	if err != nil {
 		return 0, err
 	}
@@ -253,8 +267,15 @@ func (im *realImageManager) freeSpace(bytesToFree int64) (int64, error) {
 	spaceFreed := int64(0)
 	for _, image := range images {
 		// Images that are currently in used were given a newer lastUsed.
-		if image.lastUsed.After(startTime) {
+		if image.lastUsed.After(freeTime) {
 			break
+		}
+
+		// Avoid garbage collect the image if the image is not old enough.
+		// In such a case, the image may have just been pulled down, and will be used by a container right away.
+
+		if freeTime.Sub(image.firstDetected) < im.policy.MinAge {
+			continue
 		}
 
 		// Remove image. Continue despite errors.
@@ -287,7 +308,7 @@ func (ev byLastUsedAndDetected) Swap(i, j int) { ev[i], ev[j] = ev[j], ev[i] }
 func (ev byLastUsedAndDetected) Less(i, j int) bool {
 	// Sort by last used, break ties by detected.
 	if ev[i].lastUsed.Equal(ev[j].lastUsed) {
-		return ev[i].detected.Before(ev[j].detected)
+		return ev[i].firstDetected.Before(ev[j].firstDetected)
 	} else {
 		return ev[i].lastUsed.Before(ev[j].lastUsed)
 	}
@@ -298,7 +319,7 @@ func isImageUsed(image container.Image, imagesInUse sets.String) bool {
 	if _, ok := imagesInUse[image.ID]; ok {
 		return true
 	}
-	for _, tag := range image.Tags {
+	for _, tag := range image.RepoTags {
 		if _, ok := imagesInUse[tag]; ok {
 			return true
 		}

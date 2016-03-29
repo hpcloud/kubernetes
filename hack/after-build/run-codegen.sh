@@ -23,6 +23,9 @@ source "${KUBE_ROOT}/hack/lib/init.sh"
 
 kube::golang::setup_env
 
+clientgen=$(kube::util::find-binary "client-gen")
+conversiongen=$(kube::util::find-binary "conversion-gen")
+deepcopygen=$(kube::util::find-binary "deepcopy-gen")
 setgen=$(kube::util::find-binary "set-gen")
 
 # Please do not add any logic to this shell script. Add logic to the go code
@@ -30,6 +33,11 @@ setgen=$(kube::util::find-binary "set-gen")
 #
 # This can be called with one flag, --verify-only, so it works for both the
 # update- and verify- scripts.
+${clientgen} "$@"
+${clientgen} -t "$@"
+# TODO: Enable when conversion generator is ready.
+# ${conversiongen} "$@"
+${deepcopygen} "$@"
 ${setgen} "$@"
 
-# You may add additional calls of code generators like set-gen below.
+# You may add additional calls of code generators like set-gen above.

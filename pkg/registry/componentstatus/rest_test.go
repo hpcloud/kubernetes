@@ -17,34 +17,34 @@ limitations under the License.
 package componentstatus
 
 import (
-	"bytes"
 	"fmt"
-	"io/ioutil"
-	"net/http"
 	"reflect"
 	"strings"
 	"testing"
 
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/apiserver"
-	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/pkg/probe"
+	"k8s.io/kubernetes/pkg/util/diff"
+	"net/http"
+	"net/url"
+	"time"
 )
 
-type fakeRoundTripper struct {
-	err  error
-	resp *http.Response
-	url  string
+type fakeHttpProber struct {
+	result probe.Result
+	body   string
+	err    error
 }
 
-func (f *fakeRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	f.url = req.URL.String()
-	return f.resp, f.err
+func (f *fakeHttpProber) Probe(*url.URL, http.Header, time.Duration) (probe.Result, string, error) {
+	return f.result, f.body, f.err
 }
 
 type testResponse struct {
-	code int
-	data string
-	err  error
+	result probe.Result
+	data   string
+	err    error
 }
 
 func NewTestREST(resp testResponse) *REST {
@@ -54,12 +54,10 @@ func NewTestREST(resp testResponse) *REST {
 				"test1": {Addr: "testserver1", Port: 8000, Path: "/healthz"},
 			}
 		},
-		rt: &fakeRoundTripper{
-			err: resp.err,
-			resp: &http.Response{
-				Body:       ioutil.NopCloser(bytes.NewBufferString(resp.data)),
-				StatusCode: resp.code,
-			},
+		prober: &fakeHttpProber{
+			result: resp.result,
+			body:   resp.data,
+			err:    resp.err,
 		},
 	}
 }
@@ -75,7 +73,7 @@ func createTestStatus(name string, status api.ConditionStatus, msg string, err s
 }
 
 func TestList_NoError(t *testing.T) {
-	r := NewTestREST(testResponse{code: 200, data: "ok"})
+	r := NewTestREST(testResponse{result: probe.Success, data: "ok"})
 	got, err := r.List(api.NewContext(), nil)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
@@ -84,54 +82,54 @@ func TestList_NoError(t *testing.T) {
 		Items: []api.ComponentStatus{*(createTestStatus("test1", api.ConditionTrue, "ok", ""))},
 	}
 	if e, a := expect, got; !reflect.DeepEqual(e, a) {
-		t.Errorf("Got unexpected object. Diff: %s", util.ObjectDiff(e, a))
+		t.Errorf("Got unexpected object. Diff: %s", diff.ObjectDiff(e, a))
 	}
 }
 
 func TestList_FailedCheck(t *testing.T) {
-	r := NewTestREST(testResponse{code: 500, data: ""})
+	r := NewTestREST(testResponse{result: probe.Failure, data: ""})
 	got, err := r.List(api.NewContext(), nil)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 	expect := &api.ComponentStatusList{
 		Items: []api.ComponentStatus{
-			*(createTestStatus("test1", api.ConditionFalse, "", "unhealthy http status code: 500 ()"))},
+			*(createTestStatus("test1", api.ConditionFalse, "", ""))},
 	}
 	if e, a := expect, got; !reflect.DeepEqual(e, a) {
-		t.Errorf("Got unexpected object. Diff: %s", util.ObjectDiff(e, a))
+		t.Errorf("Got unexpected object. Diff: %s", diff.ObjectDiff(e, a))
 	}
 }
 
 func TestList_UnknownError(t *testing.T) {
-	r := NewTestREST(testResponse{code: 500, data: "", err: fmt.Errorf("fizzbuzz error")})
+	r := NewTestREST(testResponse{result: probe.Unknown, data: "", err: fmt.Errorf("fizzbuzz error")})
 	got, err := r.List(api.NewContext(), nil)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 	expect := &api.ComponentStatusList{
 		Items: []api.ComponentStatus{
-			*(createTestStatus("test1", api.ConditionUnknown, "", "Get http://testserver1:8000/healthz: fizzbuzz error"))},
+			*(createTestStatus("test1", api.ConditionUnknown, "", "fizzbuzz error"))},
 	}
 	if e, a := expect, got; !reflect.DeepEqual(e, a) {
-		t.Errorf("Got unexpected object. Diff: %s", util.ObjectDiff(e, a))
+		t.Errorf("Got unexpected object. Diff: %s", diff.ObjectDiff(e, a))
 	}
 }
 
 func TestGet_NoError(t *testing.T) {
-	r := NewTestREST(testResponse{code: 200, data: "ok"})
+	r := NewTestREST(testResponse{result: probe.Success, data: "ok"})
 	got, err := r.Get(api.NewContext(), "test1")
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 	expect := createTestStatus("test1", api.ConditionTrue, "ok", "")
 	if e, a := expect, got; !reflect.DeepEqual(e, a) {
-		t.Errorf("Got unexpected object. Diff: %s", util.ObjectDiff(e, a))
+		t.Errorf("Got unexpected object. Diff: %s", diff.ObjectDiff(e, a))
 	}
 }
 
 func TestGet_BadName(t *testing.T) {
-	r := NewTestREST(testResponse{code: 200, data: "ok"})
+	r := NewTestREST(testResponse{result: probe.Success, data: "ok"})
 	_, err := r.Get(api.NewContext(), "invalidname")
 	if err == nil {
 		t.Fatalf("Expected error, but did not get one")

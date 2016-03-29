@@ -8,14 +8,49 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 
 	phttp "github.com/coreos/go-oidc/http"
 )
 
+// ResponseTypesEqual compares two response_type values. If either
+// contains a space, it is treated as an unordered list. For example,
+// comparing "code id_token" and "id_token code" would evaluate to true.
+func ResponseTypesEqual(r1, r2 string) bool {
+	if !strings.Contains(r1, " ") || !strings.Contains(r2, " ") {
+		// fast route, no split needed
+		return r1 == r2
+	}
+
+	// split, sort, and compare
+	r1Fields := strings.Fields(r1)
+	r2Fields := strings.Fields(r2)
+	if len(r1Fields) != len(r2Fields) {
+		return false
+	}
+	sort.Strings(r1Fields)
+	sort.Strings(r2Fields)
+	for i, r1Field := range r1Fields {
+		if r1Field != r2Fields[i] {
+			return false
+		}
+	}
+	return true
+}
+
 const (
-	ResponseTypeCode = "code"
+	// OAuth2.0 response types registered by OIDC.
+	//
+	// See: https://openid.net/specs/oauth-v2-multiple-response-types-1_0.html#RegistryContents
+	ResponseTypeCode             = "code"
+	ResponseTypeCodeIDToken      = "code id_token"
+	ResponseTypeCodeIDTokenToken = "code id_token token"
+	ResponseTypeIDToken          = "id_token"
+	ResponseTypeIDTokenToken     = "id_token token"
+	ResponseTypeToken            = "token"
+	ResponseTypeNone             = "none"
 )
 
 const (
@@ -136,22 +171,24 @@ func (c *Client) commonURLValues() url.Values {
 	}
 }
 
-func (c *Client) newAuthenticatedRequest(url string, values url.Values) (*http.Request, error) {
+func (c *Client) newAuthenticatedRequest(urlToken string, values url.Values) (*http.Request, error) {
 	var req *http.Request
 	var err error
 	switch c.authMethod {
 	case AuthMethodClientSecretPost:
 		values.Set("client_secret", c.creds.Secret)
-		req, err = http.NewRequest("POST", url, strings.NewReader(values.Encode()))
+		req, err = http.NewRequest("POST", urlToken, strings.NewReader(values.Encode()))
 		if err != nil {
 			return nil, err
 		}
 	case AuthMethodClientSecretBasic:
-		req, err = http.NewRequest("POST", url, strings.NewReader(values.Encode()))
+		req, err = http.NewRequest("POST", urlToken, strings.NewReader(values.Encode()))
 		if err != nil {
 			return nil, err
 		}
-		req.SetBasicAuth(c.creds.ID, c.creds.Secret)
+		encodedID := url.QueryEscape(c.creds.ID)
+		encodedSecret := url.QueryEscape(c.creds.Secret)
+		req.SetBasicAuth(encodedID, encodedSecret)
 	default:
 		panic("misconfigured client: auth method not supported")
 	}
@@ -220,11 +257,7 @@ func parseTokenResponse(resp *http.Response) (result TokenResponse, err error) {
 	if err != nil {
 		return
 	}
-
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		err = unmarshalError(body)
-		return
-	}
+	badStatusCode := resp.StatusCode < 200 || resp.StatusCode > 299
 
 	contentType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	if err != nil {
@@ -235,42 +268,69 @@ func parseTokenResponse(resp *http.Response) (result TokenResponse, err error) {
 		RawBody: body,
 	}
 
+	newError := func(typ, desc, state string) error {
+		if typ == "" {
+			return fmt.Errorf("unrecognized error %s", body)
+		}
+		return &Error{typ, desc, state}
+	}
+
 	if contentType == "application/x-www-form-urlencoded" || contentType == "text/plain" {
 		var vals url.Values
 		vals, err = url.ParseQuery(string(body))
 		if err != nil {
 			return
 		}
+		if error := vals.Get("error"); error != "" || badStatusCode {
+			err = newError(error, vals.Get("error_description"), vals.Get("state"))
+			return
+		}
+		e := vals.Get("expires_in")
+		if e == "" {
+			e = vals.Get("expires")
+		}
+		if e != "" {
+			result.Expires, err = strconv.Atoi(e)
+			if err != nil {
+				return
+			}
+		}
 		result.AccessToken = vals.Get("access_token")
 		result.TokenType = vals.Get("token_type")
 		result.IDToken = vals.Get("id_token")
 		result.RefreshToken = vals.Get("refresh_token")
 		result.Scope = vals.Get("scope")
-		e := vals.Get("expires_in")
-		if e == "" {
-			e = vals.Get("expires")
-		}
-		result.Expires, err = strconv.Atoi(e)
-		if err != nil {
-			return
-		}
 	} else {
-		b := make(map[string]interface{})
-		if err = json.Unmarshal(body, &b); err != nil {
+		var r struct {
+			AccessToken  string `json:"access_token"`
+			TokenType    string `json:"token_type"`
+			IDToken      string `json:"id_token"`
+			RefreshToken string `json:"refresh_token"`
+			Scope        string `json:"scope"`
+			State        string `json:"state"`
+			ExpiresIn    int    `json:"expires_in"`
+			Expires      int    `json:"expires"`
+			Error        string `json:"error"`
+			Desc         string `json:"error_description"`
+		}
+		if err = json.Unmarshal(body, &r); err != nil {
 			return
 		}
-		result.AccessToken, _ = b["access_token"].(string)
-		result.TokenType, _ = b["token_type"].(string)
-		result.IDToken, _ = b["id_token"].(string)
-		result.RefreshToken, _ = b["refresh_token"].(string)
-		result.Scope, _ = b["scope"].(string)
-		e, ok := b["expires_in"].(int)
-		if !ok {
-			e, _ = b["expires"].(int)
+		if r.Error != "" || badStatusCode {
+			err = newError(r.Error, r.Desc, r.State)
+			return
 		}
-		result.Expires = e
+		result.AccessToken = r.AccessToken
+		result.TokenType = r.TokenType
+		result.IDToken = r.IDToken
+		result.RefreshToken = r.RefreshToken
+		result.Scope = r.Scope
+		if r.ExpiresIn == 0 {
+			result.Expires = r.Expires
+		} else {
+			result.Expires = r.ExpiresIn
+		}
 	}
-
 	return
 }
 

@@ -31,6 +31,8 @@ coreos:
   fleet:
     metadata: "role=master"
   units:
+    - name: etcd2.service
+      command: start
     - name: generate-serviceaccount-key.service
       command: start
       content: |
@@ -76,7 +78,7 @@ coreos:
       content: |
         [Unit]
         Description=Kubernetes API Server
-        Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+        Documentation=https://github.com/kubernetes/kubernetes
         Requires=setup-network-environment.service etcd2.service generate-serviceaccount-key.service
         After=setup-network-environment.service etcd2.service generate-serviceaccount-key.service
 
@@ -107,7 +109,7 @@ coreos:
       content: |
         [Unit]
         Description=Kubernetes Controller Manager
-        Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+        Documentation=https://github.com/kubernetes/kubernetes
         Requires=kube-apiserver.service
         After=kube-apiserver.service
 
@@ -125,7 +127,7 @@ coreos:
       content: |
         [Unit]
         Description=Kubernetes Scheduler
-        Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+        Documentation=https://github.com/kubernetes/kubernetes
         Requires=kube-apiserver.service
         After=kube-apiserver.service
 

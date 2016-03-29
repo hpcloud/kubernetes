@@ -31,6 +31,24 @@ import (
 func main() {
 	arguments := args.Default()
 
+	// Override defaults. These are Kubernetes specific input locations.
+	arguments.InputDirs = []string{
+		"k8s.io/kubernetes/pkg/api",
+		"k8s.io/kubernetes/pkg/api/v1",
+		"k8s.io/kubernetes/pkg/apis/authorization",
+		"k8s.io/kubernetes/pkg/apis/authorization/v1beta1",
+		"k8s.io/kubernetes/pkg/apis/autoscaling",
+		"k8s.io/kubernetes/pkg/apis/autoscaling/v1",
+		"k8s.io/kubernetes/pkg/apis/batch",
+		"k8s.io/kubernetes/pkg/apis/batch/v1",
+		"k8s.io/kubernetes/pkg/apis/componentconfig",
+		"k8s.io/kubernetes/pkg/apis/componentconfig/v1alpha1",
+		"k8s.io/kubernetes/pkg/apis/extensions",
+		"k8s.io/kubernetes/pkg/apis/extensions/v1beta1",
+		"k8s.io/kubernetes/pkg/apis/metrics",
+		"k8s.io/kubernetes/pkg/apis/metrics/v1alpha1",
+	}
+
 	if err := arguments.Execute(
 		generators.NameSystems(),
 		generators.DefaultNameSystem(),
@@ -38,4 +56,5 @@ func main() {
 	); err != nil {
 		glog.Fatalf("Error: %v", err)
 	}
+	glog.Info("Completed successfully.")
 }

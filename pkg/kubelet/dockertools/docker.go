@@ -32,16 +32,15 @@ import (
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/kubelet/leaky"
 	"k8s.io/kubernetes/pkg/types"
-	"k8s.io/kubernetes/pkg/util"
 	utilerrors "k8s.io/kubernetes/pkg/util/errors"
+	"k8s.io/kubernetes/pkg/util/flowcontrol"
 	"k8s.io/kubernetes/pkg/util/parsers"
 )
 
 const (
-	PodInfraContainerName  = leaky.PodInfraContainerName
-	DockerPrefix           = "docker://"
-	PodInfraContainerImage = "gcr.io/google_containers/pause:2.0"
-	LogSuffix              = "log"
+	PodInfraContainerName = leaky.PodInfraContainerName
+	DockerPrefix          = "docker://"
+	LogSuffix             = "log"
 )
 
 const (
@@ -51,7 +50,8 @@ const (
 	milliCPUToCPU = 1000
 
 	// 100000 is equivalent to 100ms
-	quotaPeriod = 100000
+	quotaPeriod   = 100000
+	minQuotaPerod = 1000
 )
 
 // DockerInterface is an abstract interface for testability.  It abstracts the interface of docker.Client.
@@ -82,6 +82,17 @@ type KubeletContainerName struct {
 	ContainerName string
 }
 
+// containerNamePrefix is used to identify the containers on the node managed by this
+// process.
+var containerNamePrefix = "k8s"
+
+// SetContainerNamePrefix allows the container prefix name for this process to be changed.
+// This is intended to support testing and bootstrapping experimentation. It cannot be
+// changed once the Kubelet starts.
+func SetContainerNamePrefix(prefix string) {
+	containerNamePrefix = prefix
+}
+
 // DockerPuller is an abstract interface for testability.  It abstracts image pull operations.
 type DockerPuller interface {
 	Pull(image string, secrets []api.Secret) error
@@ -96,7 +107,7 @@ type dockerPuller struct {
 
 type throttledDockerPuller struct {
 	puller  dockerPuller
-	limiter util.RateLimiter
+	limiter flowcontrol.RateLimiter
 }
 
 // newDockerPuller creates a new instance of the default implementation of DockerPuller.
@@ -111,7 +122,7 @@ func newDockerPuller(client DockerInterface, qps float32, burst int) DockerPulle
 	}
 	return &throttledDockerPuller{
 		puller:  dp,
-		limiter: util.NewTokenBucketRateLimiter(qps, burst),
+		limiter: flowcontrol.NewTokenBucketRateLimiter(qps, burst),
 	}
 }
 
@@ -210,18 +221,20 @@ func (p throttledDockerPuller) IsImagePresent(name string) (bool, error) {
 	return p.puller.IsImagePresent(name)
 }
 
-const containerNamePrefix = "k8s"
-
 // Creates a name which can be reversed to identify both full pod name and container name.
-func BuildDockerName(dockerName KubeletContainerName, container *api.Container) (string, string) {
+// This function returns stable name, unique name and an unique id.
+// Although rand.Uint32() is not really unique, but it's enough for us because error will
+// only occur when instances of the same container in the same pod have the same UID. The
+// chance is really slim.
+func BuildDockerName(dockerName KubeletContainerName, container *api.Container) (string, string, string) {
 	containerName := dockerName.ContainerName + "." + strconv.FormatUint(kubecontainer.HashContainer(container), 16)
 	stableName := fmt.Sprintf("%s_%s_%s_%s",
 		containerNamePrefix,
 		containerName,
 		dockerName.PodFullName,
 		dockerName.PodUID)
-
-	return stableName, fmt.Sprintf("%s_%08x", stableName, rand.Uint32())
+	UID := fmt.Sprintf("%08x", rand.Uint32())
+	return stableName, fmt.Sprintf("%s_%s", stableName, UID), UID
 }
 
 // Unpacks a container name, returning the pod full name and container name we would have used to
@@ -276,7 +289,7 @@ func getDockerClient(dockerEndpoint string) (*docker.Client, error) {
 func ConnectToDockerOrDie(dockerEndpoint string) DockerInterface {
 	if dockerEndpoint == "fake://" {
 		return &FakeDockerClient{
-			VersionInfo: docker.Env{"ApiVersion=1.18"},
+			VersionInfo: docker.Env{"ApiVersion=1.18", "Version=1.6.0"},
 		}
 	}
 	client, err := getDockerClient(dockerEndpoint)
@@ -304,6 +317,11 @@ func milliCPUToQuota(milliCPU int64) (quota int64, period int64) {
 
 	// we then convert your milliCPU to a value normalized over a period
 	quota = (milliCPU * quotaPeriod) / milliCPUToCPU
+
+	// quota needs to be a minimum of 1ms.
+	if quota < minQuotaPerod {
+		quota = minQuotaPerod
+	}
 
 	return
 }

@@ -18,9 +18,10 @@
 If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
+<!-- TAG RELEASE_LINK, added by the munger automatically -->
 <strong>
 The latest release of this document can be found
-[here](http://releases.k8s.io/release-1.1/docs/design/event_compression.md).
+[here](http://releases.k8s.io/release-1.2/docs/design/event_compression.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -99,7 +100,7 @@ Each binary that generates events:
      * `event.Reason`
      * `event.Message`
    * The LRU cache is capped at 4096 events for both `EventAggregator` and `EventLogger`. That means if a component (e.g. kubelet) runs for a long period of time and generates tons of unique events, the previously generated events cache will not grow unchecked in memory. Instead, after 4096 unique events are generated, the oldest events are evicted from the cache.
- * When an event is generated, the previously generated events cache is checked (see [`pkg/client/unversioned/record/event.go`](http://releases.k8s.io/HEAD/pkg/client/unversioned/record/event.go)).
+ * When an event is generated, the previously generated events cache is checked (see [`pkg/client/unversioned/record/event.go`](http://releases.k8s.io/HEAD/pkg/client/record/event.go)).
    * If the key for the new event matches the key for a previously generated event (meaning all of the above fields match between the new event and some previously generated event), then the event is considered to be a duplicate and the existing event entry is updated in etcd:
      * The new PUT (update) event API is called to update the existing event entry in etcd with the new last seen timestamp and count.
      * The event is also updated in the previously generated events cache with an incremented count, updated last seen timestamp, name, and new resource version (all required to issue a future event update).
@@ -119,17 +120,17 @@ Sample kubectl output
 
 ```console
 FIRSTSEEN                         LASTSEEN                          COUNT               NAME                                          KIND                SUBOBJECT                                REASON              SOURCE                                                  MESSAGE
-Thu, 12 Feb 2015 01:13:02 +0000   Thu, 12 Feb 2015 01:13:02 +0000   1                   kubernetes-minion-4.c.saad-dev-vms.internal   Minion                                                       starting            {kubelet kubernetes-minion-4.c.saad-dev-vms.internal}   Starting kubelet.
-Thu, 12 Feb 2015 01:13:09 +0000   Thu, 12 Feb 2015 01:13:09 +0000   1                   kubernetes-minion-1.c.saad-dev-vms.internal   Minion                                                       starting            {kubelet kubernetes-minion-1.c.saad-dev-vms.internal}   Starting kubelet.
-Thu, 12 Feb 2015 01:13:09 +0000   Thu, 12 Feb 2015 01:13:09 +0000   1                   kubernetes-minion-3.c.saad-dev-vms.internal   Minion                                                       starting            {kubelet kubernetes-minion-3.c.saad-dev-vms.internal}   Starting kubelet.
-Thu, 12 Feb 2015 01:13:09 +0000   Thu, 12 Feb 2015 01:13:09 +0000   1                   kubernetes-minion-2.c.saad-dev-vms.internal   Minion                                                       starting            {kubelet kubernetes-minion-2.c.saad-dev-vms.internal}   Starting kubelet.
+Thu, 12 Feb 2015 01:13:02 +0000   Thu, 12 Feb 2015 01:13:02 +0000   1                   kubernetes-node-4.c.saad-dev-vms.internal     Minion                                                       starting            {kubelet kubernetes-node-4.c.saad-dev-vms.internal}     Starting kubelet.
+Thu, 12 Feb 2015 01:13:09 +0000   Thu, 12 Feb 2015 01:13:09 +0000   1                   kubernetes-node-1.c.saad-dev-vms.internal     Minion                                                       starting            {kubelet kubernetes-node-1.c.saad-dev-vms.internal}     Starting kubelet.
+Thu, 12 Feb 2015 01:13:09 +0000   Thu, 12 Feb 2015 01:13:09 +0000   1                   kubernetes-node-3.c.saad-dev-vms.internal     Minion                                                       starting            {kubelet kubernetes-node-3.c.saad-dev-vms.internal}     Starting kubelet.
+Thu, 12 Feb 2015 01:13:09 +0000   Thu, 12 Feb 2015 01:13:09 +0000   1                   kubernetes-node-2.c.saad-dev-vms.internal     Minion                                                       starting            {kubelet kubernetes-node-2.c.saad-dev-vms.internal}     Starting kubelet.
 Thu, 12 Feb 2015 01:13:05 +0000   Thu, 12 Feb 2015 01:13:12 +0000   4                   monitoring-influx-grafana-controller-0133o    Pod                                                          failedScheduling    {scheduler }                                            Error scheduling: no nodes available to schedule pods
 Thu, 12 Feb 2015 01:13:05 +0000   Thu, 12 Feb 2015 01:13:12 +0000   4                   elasticsearch-logging-controller-fplln        Pod                                                          failedScheduling    {scheduler }                                            Error scheduling: no nodes available to schedule pods
 Thu, 12 Feb 2015 01:13:05 +0000   Thu, 12 Feb 2015 01:13:12 +0000   4                   kibana-logging-controller-gziey               Pod                                                          failedScheduling    {scheduler }                                            Error scheduling: no nodes available to schedule pods
 Thu, 12 Feb 2015 01:13:05 +0000   Thu, 12 Feb 2015 01:13:12 +0000   4                   skydns-ls6k1                                  Pod                                                          failedScheduling    {scheduler }                                            Error scheduling: no nodes available to schedule pods
 Thu, 12 Feb 2015 01:13:05 +0000   Thu, 12 Feb 2015 01:13:12 +0000   4                   monitoring-heapster-controller-oh43e          Pod                                                          failedScheduling    {scheduler }                                            Error scheduling: no nodes available to schedule pods
-Thu, 12 Feb 2015 01:13:20 +0000   Thu, 12 Feb 2015 01:13:20 +0000   1                   kibana-logging-controller-gziey               BoundPod            implicitly required container POD        pulled              {kubelet kubernetes-minion-4.c.saad-dev-vms.internal}   Successfully pulled image "kubernetes/pause:latest"
-Thu, 12 Feb 2015 01:13:20 +0000   Thu, 12 Feb 2015 01:13:20 +0000   1                   kibana-logging-controller-gziey               Pod                                                          scheduled           {scheduler }                                            Successfully assigned kibana-logging-controller-gziey to kubernetes-minion-4.c.saad-dev-vms.internal
+Thu, 12 Feb 2015 01:13:20 +0000   Thu, 12 Feb 2015 01:13:20 +0000   1                   kibana-logging-controller-gziey               BoundPod            implicitly required container POD        pulled              {kubelet kubernetes-node-4.c.saad-dev-vms.internal}     Successfully pulled image "kubernetes/pause:latest"
+Thu, 12 Feb 2015 01:13:20 +0000   Thu, 12 Feb 2015 01:13:20 +0000   1                   kibana-logging-controller-gziey               Pod                                                          scheduled           {scheduler }                                            Successfully assigned kibana-logging-controller-gziey to kubernetes-node-4.c.saad-dev-vms.internal
 ```
 
 This demonstrates what would have been 20 separate entries (indicating scheduling failure) collapsed/compressed down to 5 entries.

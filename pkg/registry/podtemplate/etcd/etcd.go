@@ -20,11 +20,11 @@ import (
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/fields"
 	"k8s.io/kubernetes/pkg/labels"
+	"k8s.io/kubernetes/pkg/registry/cachesize"
 	"k8s.io/kubernetes/pkg/registry/generic"
 	etcdgeneric "k8s.io/kubernetes/pkg/registry/generic/etcd"
 	"k8s.io/kubernetes/pkg/registry/podtemplate"
 	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/storage"
 )
 
 type REST struct {
@@ -32,12 +32,12 @@ type REST struct {
 }
 
 // NewREST returns a RESTStorage object that will work against pod templates.
-func NewREST(s storage.Interface, storageDecorator generic.StorageDecorator) *REST {
+func NewREST(opts generic.RESTOptions) *REST {
 	prefix := "/podtemplates"
 
 	newListFunc := func() runtime.Object { return &api.PodTemplateList{} }
-	storageInterface := storageDecorator(
-		s, 100, &api.PodTemplate{}, prefix, false, newListFunc)
+	storageInterface := opts.Decorator(
+		opts.Storage, cachesize.GetWatchCacheSizeByResource(cachesize.PodTemplates), &api.PodTemplate{}, prefix, podtemplate.Strategy, newListFunc)
 
 	store := &etcdgeneric.Etcd{
 		NewFunc:     func() runtime.Object { return &api.PodTemplate{} },
@@ -54,10 +54,14 @@ func NewREST(s storage.Interface, storageDecorator generic.StorageDecorator) *RE
 		PredicateFunc: func(label labels.Selector, field fields.Selector) generic.Matcher {
 			return podtemplate.MatchPodTemplate(label, field)
 		},
-		EndpointName: "podtemplates",
+		QualifiedResource:       api.Resource("podtemplates"),
+		DeleteCollectionWorkers: opts.DeleteCollectionWorkers,
 
-		CreateStrategy:      podtemplate.Strategy,
-		UpdateStrategy:      podtemplate.Strategy,
+		CreateStrategy: podtemplate.Strategy,
+		UpdateStrategy: podtemplate.Strategy,
+		DeleteStrategy: podtemplate.Strategy,
+		ExportStrategy: podtemplate.Strategy,
+
 		ReturnDeletedObject: true,
 
 		Storage: storageInterface,

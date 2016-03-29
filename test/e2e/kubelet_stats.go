@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
-	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -33,15 +32,13 @@ import (
 	cadvisorapi "github.com/google/cadvisor/info/v1"
 	"github.com/prometheus/common/model"
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/unversioned"
 	client "k8s.io/kubernetes/pkg/client/unversioned"
-	"k8s.io/kubernetes/pkg/kubelet"
 	"k8s.io/kubernetes/pkg/kubelet/metrics"
+	"k8s.io/kubernetes/pkg/kubelet/server/stats"
 	"k8s.io/kubernetes/pkg/master/ports"
-	"k8s.io/kubernetes/pkg/util"
+	utilerrors "k8s.io/kubernetes/pkg/util/errors"
 	"k8s.io/kubernetes/pkg/util/sets"
-
-	. "github.com/onsi/gomega"
+	"k8s.io/kubernetes/pkg/util/wait"
 )
 
 // KubeletMetric stores metrics scraped from the kubelet server's /metric endpoint.
@@ -151,19 +148,40 @@ func HighLatencyKubeletOperations(c *client.Client, threshold time.Duration, nod
 
 // getContainerInfo contacts kubelet for the container information. The "Stats"
 // in the returned ContainerInfo is subject to the requirements in statsRequest.
-func getContainerInfo(c *client.Client, nodeName string, req *kubelet.StatsRequest) (map[string]cadvisorapi.ContainerInfo, error) {
+func getContainerInfo(c *client.Client, nodeName string, req *stats.StatsRequest) (map[string]cadvisorapi.ContainerInfo, error) {
 	reqBody, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
 	}
-	data, err := c.Post().
-		Prefix("proxy").
-		Resource("nodes").
-		Name(fmt.Sprintf("%v:%v", nodeName, ports.KubeletPort)).
-		Suffix("stats/container").
-		SetHeader("Content-Type", "application/json").
-		Body(reqBody).
-		Do().Raw()
+	subResourceProxyAvailable, err := serverVersionGTE(subResourceServiceAndNodeProxyVersion, c)
+	if err != nil {
+		return nil, err
+	}
+
+	var data []byte
+	if subResourceProxyAvailable {
+		data, err = c.Post().
+			Resource("nodes").
+			SubResource("proxy").
+			Name(fmt.Sprintf("%v:%v", nodeName, ports.KubeletPort)).
+			Suffix("stats/container").
+			SetHeader("Content-Type", "application/json").
+			Body(reqBody).
+			Do().Raw()
+
+	} else {
+		data, err = c.Post().
+			Prefix("proxy").
+			Resource("nodes").
+			Name(fmt.Sprintf("%v:%v", nodeName, ports.KubeletPort)).
+			Suffix("stats/container").
+			SetHeader("Content-Type", "application/json").
+			Body(reqBody).
+			Do().Raw()
+	}
+	if err != nil {
+		return nil, err
+	}
 
 	var containers map[string]cadvisorapi.ContainerInfo
 	err = json.Unmarshal(data, &containers)
@@ -200,17 +218,19 @@ type containerResourceUsage struct {
 	Name                    string
 	Timestamp               time.Time
 	CPUUsageInCores         float64
-	MemoryUsageInBytes      int64
-	MemoryWorkingSetInBytes int64
+	MemoryUsageInBytes      uint64
+	MemoryWorkingSetInBytes uint64
+	MemoryRSSInBytes        uint64
 	// The interval used to calculate CPUUsageInCores.
 	CPUInterval time.Duration
 }
 
 func (r *containerResourceUsage) isStrictlyGreaterThan(rhs *containerResourceUsage) bool {
-	return r.CPUUsageInCores > rhs.CPUUsageInCores && r.MemoryUsageInBytes > rhs.MemoryUsageInBytes && r.MemoryWorkingSetInBytes > rhs.MemoryWorkingSetInBytes
+	return r.CPUUsageInCores > rhs.CPUUsageInCores && r.MemoryWorkingSetInBytes > rhs.MemoryWorkingSetInBytes
 }
 
 type resourceUsagePerContainer map[string]*containerResourceUsage
+type resourceUsagePerNode map[string]resourceUsagePerContainer
 
 // getOneTimeResourceUsageOnNode queries the node's /stats/container endpoint
 // and returns the resource usage of all containerNames for the past
@@ -227,7 +247,7 @@ type resourceUsagePerContainer map[string]*containerResourceUsage
 // write the actual interval used for calculation (based on the timestamps of
 // the stats points in containerResourceUsage.CPUInterval.
 //
-// containerNames is a function returning a collection of contianer names in which
+// containerNames is a function returning a collection of container names in which
 // user is interested in. ExpectMissingContainers is a flag which says if the test
 // should fail if one of containers listed by containerNames is missing on any node
 // (useful e.g. when looking for system containers or daemons). If set to true function
@@ -244,7 +264,7 @@ func getOneTimeResourceUsageOnNode(
 		return nil, fmt.Errorf("numStats needs to be > 1 and < %d", maxNumStatsToRequest)
 	}
 	// Get information of all containers on the node.
-	containerInfos, err := getContainerInfo(c, nodeName, &kubelet.StatsRequest{
+	containerInfos, err := getContainerInfo(c, nodeName, &stats.StatsRequest{
 		ContainerName: "/",
 		NumStats:      numStats,
 		Subcontainers: true,
@@ -268,52 +288,6 @@ func getOneTimeResourceUsageOnNode(
 		usageMap[name] = computeContainerResourceUsage(name, first, last)
 	}
 	return usageMap, nil
-}
-
-func getKubeSystemContainersResourceUsage(c *client.Client) (resourceUsagePerContainer, error) {
-	pods, err := c.Pods("kube-system").List(unversioned.ListOptions{})
-	if err != nil {
-		return resourceUsagePerContainer{}, err
-	}
-	nodes, err := c.Nodes().List(unversioned.ListOptions{})
-	if err != nil {
-		return resourceUsagePerContainer{}, err
-	}
-	containerIDToNameMap := make(map[string]string)
-	containerIDs := make([]string, 0)
-	for _, pod := range pods.Items {
-		for _, container := range pod.Status.ContainerStatuses {
-			containerID := strings.TrimPrefix(container.ContainerID, "docker:/")
-			containerIDToNameMap[containerID] = pod.Name + "/" + container.Name
-			containerIDs = append(containerIDs, containerID)
-		}
-	}
-
-	mutex := sync.Mutex{}
-	wg := sync.WaitGroup{}
-	wg.Add(len(nodes.Items))
-	errors := make([]error, 0)
-	nameToUsageMap := make(resourceUsagePerContainer, len(containerIDToNameMap))
-	for _, node := range nodes.Items {
-		go func(nodeName string) {
-			defer wg.Done()
-			nodeUsage, err := getOneTimeResourceUsageOnNode(c, nodeName, 15*time.Second, func() []string { return containerIDs }, true)
-			mutex.Lock()
-			defer mutex.Unlock()
-			if err != nil {
-				errors = append(errors, err)
-				return
-			}
-			for k, v := range nodeUsage {
-				nameToUsageMap[containerIDToNameMap[k]] = v
-			}
-		}(node.Name)
-	}
-	wg.Wait()
-	if len(errors) != 0 {
-		return resourceUsagePerContainer{}, fmt.Errorf("Errors while gathering usage data: %v", errors)
-	}
-	return nameToUsageMap, nil
 }
 
 // logOneTimeResourceUsageSummary collects container resource for the list of
@@ -342,173 +316,34 @@ func formatResourceUsageStats(nodeName string, containerStats resourceUsagePerCo
 	// "/system"        0.007       119.88
 	buf := &bytes.Buffer{}
 	w := tabwriter.NewWriter(buf, 1, 0, 1, ' ', 0)
-	fmt.Fprintf(w, "container\tcpu(cores)\tmemory(MB)\n")
+	fmt.Fprintf(w, "container\tcpu(cores)\tmemory_working_set(MB)\tmemory_rss(MB)\n")
 	for name, s := range containerStats {
-		fmt.Fprintf(w, "%q\t%.3f\t%.2f\n", name, s.CPUUsageInCores, float64(s.MemoryWorkingSetInBytes)/(1024*1024))
+		fmt.Fprintf(w, "%q\t%.3f\t%.2f\t%.2f\n", name, s.CPUUsageInCores, float64(s.MemoryWorkingSetInBytes)/(1024*1024), float64(s.MemoryRSSInBytes)/(1024*1024))
 	}
 	w.Flush()
 	return fmt.Sprintf("Resource usage on node %q:\n%s", nodeName, buf.String())
 }
 
-type int64arr []int64
+type uint64arr []uint64
 
-func (a int64arr) Len() int           { return len(a) }
-func (a int64arr) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
-func (a int64arr) Less(i, j int) bool { return a[i] < a[j] }
+func (a uint64arr) Len() int           { return len(a) }
+func (a uint64arr) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a uint64arr) Less(i, j int) bool { return a[i] < a[j] }
 
 type usageDataPerContainer struct {
 	cpuData        []float64
-	memUseData     []int64
-	memWorkSetData []int64
-}
-
-func computePercentiles(timeSeries map[time.Time]resourceUsagePerContainer, percentilesToCompute []int) map[int]resourceUsagePerContainer {
-	if len(timeSeries) == 0 {
-		return make(map[int]resourceUsagePerContainer)
-	}
-	dataMap := make(map[string]*usageDataPerContainer)
-	for _, singleStatistic := range timeSeries {
-		for name, data := range singleStatistic {
-			if dataMap[name] == nil {
-				dataMap[name] = &usageDataPerContainer{
-					cpuData:        make([]float64, len(timeSeries)),
-					memUseData:     make([]int64, len(timeSeries)),
-					memWorkSetData: make([]int64, len(timeSeries)),
-				}
-			}
-			dataMap[name].cpuData = append(dataMap[name].cpuData, data.CPUUsageInCores)
-			dataMap[name].memUseData = append(dataMap[name].memUseData, data.MemoryUsageInBytes)
-			dataMap[name].memWorkSetData = append(dataMap[name].memWorkSetData, data.MemoryWorkingSetInBytes)
-		}
-	}
-	for _, v := range dataMap {
-		sort.Float64s(v.cpuData)
-		sort.Sort(int64arr(v.memUseData))
-		sort.Sort(int64arr(v.memWorkSetData))
-	}
-
-	result := make(map[int]resourceUsagePerContainer)
-	for _, perc := range percentilesToCompute {
-		data := make(resourceUsagePerContainer)
-		for k, v := range dataMap {
-			percentileIndex := int(math.Ceil(float64(len(v.cpuData)*perc)/100)) - 1
-			data[k] = &containerResourceUsage{
-				Name:                    k,
-				CPUUsageInCores:         v.cpuData[percentileIndex],
-				MemoryUsageInBytes:      v.memUseData[percentileIndex],
-				MemoryWorkingSetInBytes: v.memWorkSetData[percentileIndex],
-			}
-		}
-		result[perc] = data
-	}
-	return result
-}
-
-type resourceConstraint struct {
-	cpuConstraint    float64
-	memoryConstraint int64
-}
-
-type containerResourceGatherer struct {
-	usageTimeseries map[time.Time]resourceUsagePerContainer
-	stopCh          chan struct{}
-	timer           *time.Ticker
-	wg              sync.WaitGroup
-}
-
-func (g *containerResourceGatherer) startGatheringData(c *client.Client, period time.Duration) {
-	g.usageTimeseries = make(map[time.Time]resourceUsagePerContainer)
-	g.wg.Add(1)
-	g.stopCh = make(chan struct{})
-	g.timer = time.NewTicker(period)
-	go func() error {
-		for {
-			select {
-			case <-g.timer.C:
-				now := time.Now()
-				data, err := getKubeSystemContainersResourceUsage(c)
-				if err != nil {
-					return err
-				}
-				g.usageTimeseries[now] = data
-			case <-g.stopCh:
-				g.wg.Done()
-				return nil
-			}
-		}
-	}()
-}
-
-func (g *containerResourceGatherer) stopAndPrintData(percentiles []int, constraints map[string]resourceConstraint) {
-	close(g.stopCh)
-	g.timer.Stop()
-	g.wg.Wait()
-	if len(percentiles) == 0 {
-		Logf("Warning! Empty percentile list for stopAndPrintData.")
-		return
-	}
-	stats := computePercentiles(g.usageTimeseries, percentiles)
-	sortedKeys := []string{}
-	for name := range stats[percentiles[0]] {
-		sortedKeys = append(sortedKeys, name)
-	}
-	sort.Strings(sortedKeys)
-	violatedConstraints := make([]string, 0)
-	for _, perc := range percentiles {
-		buf := &bytes.Buffer{}
-		w := tabwriter.NewWriter(buf, 1, 0, 1, ' ', 0)
-		fmt.Fprintf(w, "container\tcpu(cores)\tmemory(MB)\n")
-		for _, name := range sortedKeys {
-			usage := stats[perc][name]
-			fmt.Fprintf(w, "%q\t%.3f\t%.2f\n", name, usage.CPUUsageInCores, float64(usage.MemoryWorkingSetInBytes)/(1024*1024))
-			// Verifying 99th percentile of resource usage
-			if perc == 99 {
-				// Name has a form: <pod_name>/<container_name>
-				containerName := strings.Split(name, "/")[1]
-				if constraint, ok := constraints[containerName]; ok {
-					if usage.CPUUsageInCores > constraint.cpuConstraint {
-						violatedConstraints = append(
-							violatedConstraints,
-							fmt.Sprintf("Container %v is using %v/%v CPU",
-								name,
-								usage.CPUUsageInCores,
-								constraint.cpuConstraint,
-							),
-						)
-					}
-					if usage.MemoryWorkingSetInBytes > constraint.memoryConstraint {
-						violatedConstraints = append(
-							violatedConstraints,
-							fmt.Sprintf("Container %v is using %v/%v MB of memory",
-								name,
-								float64(usage.MemoryWorkingSetInBytes)/(1024*1024),
-								float64(constraint.memoryConstraint)/(1024*1024),
-							),
-						)
-					}
-				}
-			}
-		}
-		w.Flush()
-		Logf("%v percentile:\n%v", perc, buf.String())
-	}
-	Expect(violatedConstraints).To(BeEmpty())
-}
-
-// Performs a get on a node proxy endpoint given the nodename and rest client.
-func nodeProxyRequest(c *client.Client, node, endpoint string) client.Result {
-	return c.Get().
-		Prefix("proxy").
-		Resource("nodes").
-		Name(fmt.Sprintf("%v:%v", node, ports.KubeletPort)).
-		Suffix(endpoint).
-		Do()
+	memUseData     []uint64
+	memWorkSetData []uint64
 }
 
 // Retrieve metrics from the kubelet server of the given node.
 func getKubeletMetricsThroughProxy(c *client.Client, node string) (string, error) {
-	metric, err := nodeProxyRequest(c, node, "metrics").Raw()
+	client, err := NodeProxyRequest(c, node, "metrics")
 	if err != nil {
+		return "", err
+	}
+	metric, errRaw := client.Raw()
+	if errRaw != nil {
 		return "", err
 	}
 	return string(metric), nil
@@ -529,15 +364,35 @@ func getKubeletMetricsThroughNode(nodeName string) (string, error) {
 	return string(body), nil
 }
 
-// GetKubeletPods retrieves the list of running pods on the kubelet. The pods
-// includes necessary information (e.g., UID, name, namespace for
-// pods/containers), but do not contain the full spec.
-func GetKubeletPods(c *client.Client, node string) (*api.PodList, error) {
-	result := &api.PodList{}
-	if err := nodeProxyRequest(c, node, "runningpods").Into(result); err != nil {
-		return &api.PodList{}, err
+func getKubeletHeapStats(c *client.Client, nodeName string) (string, error) {
+	client, err := NodeProxyRequest(c, nodeName, "debug/pprof/heap")
+	if err != nil {
+		return "", err
 	}
-	return result, nil
+	raw, errRaw := client.Raw()
+	if errRaw != nil {
+		return "", err
+	}
+	stats := string(raw)
+	// Only dumping the runtime.MemStats numbers to avoid polluting the log.
+	numLines := 23
+	lines := strings.Split(stats, "\n")
+	return strings.Join(lines[len(lines)-numLines:], "\n"), nil
+}
+
+func PrintAllKubeletPods(c *client.Client, nodeName string) {
+	podList, err := GetKubeletPods(c, nodeName)
+	if err != nil {
+		Logf("Unable to retrieve kubelet pods for node %v: %v", nodeName, err)
+		return
+	}
+	for _, p := range podList.Items {
+		Logf("%v from %v started at %v (%d container statuses recorded)", p.Name, p.Namespace, p.Status.StartTime, len(p.Status.ContainerStatuses))
+		for _, c := range p.Status.ContainerStatuses {
+			Logf("\tContainer %v ready: %v, restart count %v",
+				c.Name, c.Ready, c.RestartCount)
+		}
+	}
 }
 
 func computeContainerResourceUsage(name string, oldStats, newStats *cadvisorapi.ContainerStats) *containerResourceUsage {
@@ -545,8 +400,9 @@ func computeContainerResourceUsage(name string, oldStats, newStats *cadvisorapi.
 		Name:                    name,
 		Timestamp:               newStats.Timestamp,
 		CPUUsageInCores:         float64(newStats.Cpu.Usage.Total-oldStats.Cpu.Usage.Total) / float64(newStats.Timestamp.Sub(oldStats.Timestamp).Nanoseconds()),
-		MemoryUsageInBytes:      int64(newStats.Memory.Usage),
-		MemoryWorkingSetInBytes: int64(newStats.Memory.WorkingSet),
+		MemoryUsageInBytes:      newStats.Memory.Usage,
+		MemoryWorkingSetInBytes: newStats.Memory.WorkingSet,
+		MemoryRSSInBytes:        newStats.Memory.RSS,
 		CPUInterval:             newStats.Timestamp.Sub(oldStats.Timestamp),
 	}
 }
@@ -580,7 +436,7 @@ func (r *resourceCollector) Start() {
 	r.stopCh = make(chan struct{}, 1)
 	// Keep the last observed stats for comparison.
 	oldStats := make(map[string]*cadvisorapi.ContainerStats)
-	go util.Until(func() { r.collectStats(oldStats) }, r.pollingInterval, r.stopCh)
+	go wait.Until(func() { r.collectStats(oldStats) }, r.pollingInterval, r.stopCh)
 }
 
 // Stop sends a signal to terminate the stats collecting goroutine.
@@ -591,7 +447,7 @@ func (r *resourceCollector) Stop() {
 // collectStats gets the latest stats from kubelet's /stats/container, computes
 // the resource usage, and pushes it to the buffer.
 func (r *resourceCollector) collectStats(oldStats map[string]*cadvisorapi.ContainerStats) {
-	infos, err := getContainerInfo(r.client, r.node, &kubelet.StatsRequest{
+	infos, err := getContainerInfo(r.client, r.node, &stats.StatsRequest{
 		ContainerName: "/",
 		NumStats:      1,
 		Subcontainers: true,
@@ -608,27 +464,30 @@ func (r *resourceCollector) collectStats(oldStats map[string]*cadvisorapi.Contai
 			Logf("Missing info/stats for container %q on node %q", name, r.node)
 			return
 		}
-		if _, ok := oldStats[name]; ok {
-			r.buffers[name] = append(r.buffers[name], computeContainerResourceUsage(name, oldStats[name], info.Stats[0]))
+		if oldInfo, ok := oldStats[name]; ok {
+			newInfo := info.Stats[0]
+			if oldInfo.Timestamp.Equal(newInfo.Timestamp) {
+				// No change -> skip this stat.
+				continue
+			}
+			r.buffers[name] = append(r.buffers[name], computeContainerResourceUsage(name, oldInfo, newInfo))
 		}
 		oldStats[name] = info.Stats[0]
 	}
 }
 
-// LogLatest logs the latest resource usage of each container.
-func (r *resourceCollector) LogLatest() {
+func (r *resourceCollector) GetLatest() (resourceUsagePerContainer, error) {
 	r.lock.RLock()
 	defer r.lock.RUnlock()
-	stats := make(map[string]*containerResourceUsage)
+	stats := make(resourceUsagePerContainer)
 	for _, name := range r.containers {
 		contStats, ok := r.buffers[name]
 		if !ok || len(contStats) == 0 {
-			Logf("Resource usage on node %q is not ready yet", r.node)
-			return
+			return nil, fmt.Errorf("Resource usage on node %q is not ready yet", r.node)
 		}
 		stats[name] = contStats[len(contStats)-1]
 	}
-	Logf("\n%s", formatResourceUsageStats(r.node, stats))
+	return stats, nil
 }
 
 // Reset frees the stats and start over.
@@ -686,13 +545,14 @@ func newResourceMonitor(c *client.Client, containerNames []string, pollingInterv
 }
 
 func (r *resourceMonitor) Start() {
-	nodes, err := r.client.Nodes().List(unversioned.ListOptions{})
+	// It should be OK to monitor unschedulable Nodes
+	nodes, err := r.client.Nodes().List(api.ListOptions{})
 	if err != nil {
 		Failf("resourceMonitor: unable to get list of nodes: %v", err)
 	}
 	r.collectors = make(map[string]*resourceCollector, 0)
 	for _, node := range nodes.Items {
-		collector := newResourceCollector(r.client, node.Name, r.containers, pollInterval)
+		collector := newResourceCollector(r.client, node.Name, r.containers, r.pollingInterval)
 		r.collectors[node.Name] = collector
 		collector.Start()
 	}
@@ -711,38 +571,93 @@ func (r *resourceMonitor) Reset() {
 }
 
 func (r *resourceMonitor) LogLatest() {
-	for _, collector := range r.collectors {
-		collector.LogLatest()
+	summary, err := r.GetLatest()
+	if err != nil {
+		Logf("%v", err)
 	}
+	Logf("%s", r.FormatResourceUsage(summary))
 }
 
-func (r *resourceMonitor) LogCPUSummary() {
+func (r *resourceMonitor) FormatResourceUsage(s resourceUsagePerNode) string {
+	summary := []string{}
+	for node, usage := range s {
+		summary = append(summary, formatResourceUsageStats(node, usage))
+	}
+	return strings.Join(summary, "\n")
+}
+
+func (r *resourceMonitor) GetLatest() (resourceUsagePerNode, error) {
+	result := make(resourceUsagePerNode)
+	errs := []error{}
+	for key, collector := range r.collectors {
+		s, err := collector.GetLatest()
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		result[key] = s
+	}
+	return result, utilerrors.NewAggregate(errs)
+}
+
+// containersCPUSummary is indexed by the container name with each entry a
+// (percentile, value) map.
+type containersCPUSummary map[string]map[float64]float64
+
+// nodesCPUSummary is indexed by the node name with each entry a
+// containersCPUSummary map.
+type nodesCPUSummary map[string]containersCPUSummary
+
+func (r *resourceMonitor) FormatCPUSummary(summary nodesCPUSummary) string {
 	// Example output for a node (the percentiles may differ):
-	// CPU usage of containers on node "e2e-test-yjhong-minion-0vj7":
+	// CPU usage of containers on node "e2e-test-foo-minion-0vj7":
 	// container        5th%  50th% 90th% 95th%
 	// "/"              0.051 0.159 0.387 0.455
 	// "/docker-daemon" 0.000 0.000 0.146 0.166
 	// "/kubelet"       0.036 0.053 0.091 0.154
 	// "/system"        0.001 0.001 0.001 0.002
+	var summaryStrings []string
 	var header []string
 	header = append(header, "container")
 	for _, p := range percentiles {
 		header = append(header, fmt.Sprintf("%.0fth%%", p*100))
 	}
-	for nodeName, collector := range r.collectors {
+	for nodeName, containers := range summary {
 		buf := &bytes.Buffer{}
 		w := tabwriter.NewWriter(buf, 1, 0, 1, ' ', 0)
 		fmt.Fprintf(w, "%s\n", strings.Join(header, "\t"))
 		for _, containerName := range targetContainers() {
-			data := collector.GetBasicCPUStats(containerName)
 			var s []string
 			s = append(s, fmt.Sprintf("%q", containerName))
+			data, ok := containers[containerName]
 			for _, p := range percentiles {
-				s = append(s, fmt.Sprintf("%.3f", data[p]))
+				value := "N/A"
+				if ok {
+					value = fmt.Sprintf("%.3f", data[p])
+				}
+				s = append(s, value)
 			}
 			fmt.Fprintf(w, "%s\n", strings.Join(s, "\t"))
 		}
 		w.Flush()
-		Logf("\nCPU usage of containers on node %q:\n%s", nodeName, buf.String())
+		summaryStrings = append(summaryStrings, fmt.Sprintf("CPU usage of containers on node %q\n:%s", nodeName, buf.String()))
 	}
+	return strings.Join(summaryStrings, "\n")
+}
+
+func (r *resourceMonitor) LogCPUSummary() {
+	summary := r.GetCPUSummary()
+	Logf("%s", r.FormatCPUSummary(summary))
+}
+
+func (r *resourceMonitor) GetCPUSummary() nodesCPUSummary {
+	result := make(nodesCPUSummary)
+	for nodeName, collector := range r.collectors {
+		result[nodeName] = make(containersCPUSummary)
+		for _, containerName := range targetContainers() {
+			data := collector.GetBasicCPUStats(containerName)
+			result[nodeName][containerName] = data
+		}
+	}
+	return result
 }

@@ -25,8 +25,10 @@ import (
 	"os"
 	"runtime"
 
-	kubeletapp "k8s.io/kubernetes/cmd/kubelet/app"
+	"k8s.io/kubernetes/cmd/kubelet/app"
+	"k8s.io/kubernetes/cmd/kubelet/app/options"
 	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/pkg/util/flag"
 	"k8s.io/kubernetes/pkg/version/verflag"
 
 	"github.com/spf13/pflag"
@@ -34,16 +36,16 @@ import (
 
 func main() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
-	s := kubeletapp.NewKubeletServer()
+	s := options.NewKubeletServer()
 	s.AddFlags(pflag.CommandLine)
 
-	util.InitFlags()
+	flag.InitFlags()
 	util.InitLogs()
 	defer util.FlushLogs()
 
 	verflag.PrintAndExitIfRequested()
 
-	if err := s.Run(nil); err != nil {
+	if err := app.Run(s, nil); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}

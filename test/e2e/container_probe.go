@@ -35,8 +35,8 @@ const (
 	probTestInitialDelaySeconds = 30
 )
 
-var _ = Describe("Probing container", func() {
-	framework := NewFramework("container-probe")
+var _ = KubeDescribe("Probing container", func() {
+	framework := NewDefaultFramework("container-probe")
 	var podClient client.PodInterface
 	probe := webserverProbeBuilder{}
 
@@ -48,7 +48,7 @@ var _ = Describe("Probing container", func() {
 		p, err := podClient.Create(makePodSpec(probe.withInitialDelay().build(), nil))
 		expectNoError(err)
 
-		Expect(wait.Poll(poll, 120*time.Second, func() (bool, error) {
+		Expect(wait.Poll(poll, 240*time.Second, func() (bool, error) {
 			p, err := podClient.Get(p.Name)
 			if err != nil {
 				return false, err
@@ -88,7 +88,7 @@ var _ = Describe("Probing container", func() {
 		p, err := podClient.Create(makePodSpec(probe.withFailing().build(), nil))
 		expectNoError(err)
 
-		err = wait.Poll(poll, 120*time.Second, func() (bool, error) {
+		err = wait.Poll(poll, 180*time.Second, func() (bool, error) {
 			p, err := podClient.Get(p.Name)
 			if err != nil {
 				return false, err
@@ -148,7 +148,7 @@ func makePodSpec(readinessProbe, livenessProbe *api.Probe) *api.Pod {
 			Containers: []api.Container{
 				{
 					Name:           probTestContainerName,
-					Image:          "gcr.io/google_containers/test-webserver",
+					Image:          "gcr.io/google_containers/test-webserver:e2e",
 					LivenessProbe:  livenessProbe,
 					ReadinessProbe: readinessProbe,
 				},

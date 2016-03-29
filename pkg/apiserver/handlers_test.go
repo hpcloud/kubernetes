@@ -17,6 +17,7 @@ limitations under the License.
 package apiserver
 
 import (
+	"fmt"
 	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
@@ -30,6 +31,7 @@ import (
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/errors"
 	"k8s.io/kubernetes/pkg/api/testapi"
+	"k8s.io/kubernetes/pkg/apis/extensions"
 	"k8s.io/kubernetes/pkg/auth/authorizer"
 	"k8s.io/kubernetes/pkg/util/sets"
 )
@@ -40,15 +42,15 @@ func (fakeRL) Stop()             {}
 func (f fakeRL) TryAccept() bool { return bool(f) }
 func (f fakeRL) Accept()         {}
 
-func expectHTTP(url string, code int, t *testing.T) {
+func expectHTTP(url string, code int) error {
 	r, err := http.Get(url)
 	if err != nil {
-		t.Errorf("unexpected error: %v", err)
-		return
+		return fmt.Errorf("unexpected error: %v", err)
 	}
 	if r.StatusCode != code {
-		t.Errorf("unexpected response: %v", r.StatusCode)
+		return fmt.Errorf("unexpected response: %v", r.StatusCode)
 	}
+	return nil
 }
 
 func getPath(resource, namespace, name string) string {
@@ -64,7 +66,7 @@ func pathWithPrefix(prefix, resource, namespace, name string) string {
 //   hanging for the long time,
 // - "short" requests are correctly accounted, i.e. there can be only size of channel passed to the
 //   constructor in flight at any given moment,
-// - subsequent "short" requests are rejected instantly with apropriate error,
+// - subsequent "short" requests are rejected instantly with appropriate error,
 // - subsequent "long" requests are handled normally,
 // - we correctly recover after some "short" requests finish, i.e. we can process new ones.
 func TestMaxInFlight(t *testing.T) {
@@ -75,12 +77,20 @@ func TestMaxInFlight(t *testing.T) {
 	// notAccountedPathsRegexp specifies paths requests to which we don't account into
 	// requests in flight.
 	notAccountedPathsRegexp := regexp.MustCompile(".*\\/watch")
+	longRunningRequestCheck := BasicLongRunningRequestCheck(notAccountedPathsRegexp, map[string]string{"watch": "true"})
 
 	// Calls is used to wait until all server calls are received. We are sending
 	// AllowedInflightRequestsNo of 'long' not-accounted requests and the same number of
 	// 'short' accounted ones.
 	calls := &sync.WaitGroup{}
 	calls.Add(AllowedInflightRequestsNo * 2)
+
+	// Responses is used to wait until all responses are
+	// received. This prevents some async requests getting EOF
+	// errors from prematurely closing the server
+	responses := sync.WaitGroup{}
+	responses.Add(AllowedInflightRequestsNo * 2)
+
 	// Block is used to keep requests in flight for as long as we need to. All requests will
 	// be unblocked at the same time.
 	block := sync.WaitGroup{}
@@ -89,7 +99,7 @@ func TestMaxInFlight(t *testing.T) {
 	server := httptest.NewServer(
 		MaxInFlightLimit(
 			inflightRequestsChannel,
-			notAccountedPathsRegexp,
+			longRunningRequestCheck,
 			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				// A short, accounted request that does not wait for block WaitGroup.
 				if strings.Contains(r.URL.Path, "dontwait") {
@@ -102,27 +112,32 @@ func TestMaxInFlight(t *testing.T) {
 			}),
 		),
 	)
-	defer server.Close()
+	// TODO: Uncomment when fix #19254
+	// defer server.Close()
 
-	// These should hang, but not affect accounting.
+	// These should hang, but not affect accounting.  use a query param match
 	for i := 0; i < AllowedInflightRequestsNo; i++ {
 		// These should hang waiting on block...
 		go func() {
-			expectHTTP(server.URL+"/foo/bar/watch", http.StatusOK, t)
+			if err := expectHTTP(server.URL+"/foo/bar?watch=true", http.StatusOK); err != nil {
+				t.Error(err)
+			}
+			responses.Done()
 		}()
 	}
 	// Check that sever is not saturated by not-accounted calls
-	expectHTTP(server.URL+"/dontwait", http.StatusOK, t)
-	oneAccountedFinished := sync.WaitGroup{}
-	oneAccountedFinished.Add(1)
-	var once sync.Once
+	if err := expectHTTP(server.URL+"/dontwait", http.StatusOK); err != nil {
+		t.Error(err)
+	}
 
 	// These should hang and be accounted, i.e. saturate the server
 	for i := 0; i < AllowedInflightRequestsNo; i++ {
 		// These should hang waiting on block...
 		go func() {
-			expectHTTP(server.URL, http.StatusOK, t)
-			once.Do(oneAccountedFinished.Done)
+			if err := expectHTTP(server.URL, http.StatusOK); err != nil {
+				t.Error(err)
+			}
+			responses.Done()
 		}()
 	}
 	// We wait for all calls to be received by the server
@@ -132,18 +147,24 @@ func TestMaxInFlight(t *testing.T) {
 
 	// Do this multiple times to show that it rate limit rejected requests don't block.
 	for i := 0; i < 2; i++ {
-		expectHTTP(server.URL, errors.StatusTooManyRequests, t)
+		if err := expectHTTP(server.URL, errors.StatusTooManyRequests); err != nil {
+			t.Error(err)
+		}
 	}
-	// Validate that non-accounted URLs still work
-	expectHTTP(server.URL+"/dontwait/watch", http.StatusOK, t)
+	// Validate that non-accounted URLs still work.  use a path regex match
+	if err := expectHTTP(server.URL+"/dontwait/watch", http.StatusOK); err != nil {
+		t.Error(err)
+	}
 
 	// Let all hanging requests finish
 	block.Done()
 
 	// Show that we recover from being blocked up.
 	// Too avoid flakyness we need to wait until at least one of the requests really finishes.
-	oneAccountedFinished.Wait()
-	expectHTTP(server.URL, http.StatusOK, t)
+	responses.Wait()
+	if err := expectHTTP(server.URL, http.StatusOK); err != nil {
+		t.Error(err)
+	}
 }
 
 func TestReadOnly(t *testing.T) {
@@ -154,7 +175,8 @@ func TestReadOnly(t *testing.T) {
 			}
 		},
 	)))
-	defer server.Close()
+	// TODO: Uncomment when fix #19254
+	// defer server.Close()
 	for _, verb := range []string{"GET", "POST", "PUT", "DELETE", "CREATE"} {
 		req, err := http.NewRequest(verb, server.URL, nil)
 		if err != nil {
@@ -180,7 +202,8 @@ func TestTimeout(t *testing.T) {
 		func(*http.Request) (<-chan time.Time, string) {
 			return timeout, timeoutResp
 		}))
-	defer ts.Close()
+	// TODO: Uncomment when fix #19254
+	// defer ts.Close()
 
 	// No timeouts
 	sendResponse <- struct{}{}
@@ -281,7 +304,7 @@ func TestGetAttribs(t *testing.T) {
 				Verb:            "list",
 				Path:            "/apis/extensions/v1beta1/namespaces/myns/jobs",
 				ResourceRequest: true,
-				APIGroup:        "extensions",
+				APIGroup:        extensions.GroupName,
 				Namespace:       "myns",
 				Resource:        "jobs",
 			},
@@ -335,12 +358,19 @@ func TestGetAPIRequestInfo(t *testing.T) {
 		// subresource identification
 		{"GET", "/api/v1/namespaces/other/pods/foo/status", "get", "api", "", "v1", "other", "pods", "status", "foo", []string{"pods", "foo", "status"}},
 		{"GET", "/api/v1/namespaces/other/pods/foo/proxy/subpath", "get", "api", "", "v1", "other", "pods", "proxy", "foo", []string{"pods", "foo", "proxy", "subpath"}},
-		{"PUT", "/api/v1/namespaces/other/finalize", "update", "api", "", "v1", "other", "finalize", "", "", []string{"finalize"}},
+		{"PUT", "/api/v1/namespaces/other/finalize", "update", "api", "", "v1", "other", "namespaces", "finalize", "other", []string{"namespaces", "other", "finalize"}},
+		{"PUT", "/api/v1/namespaces/other/status", "update", "api", "", "v1", "other", "namespaces", "status", "other", []string{"namespaces", "other", "status"}},
 
 		// verb identification
 		{"PATCH", "/api/v1/namespaces/other/pods/foo", "patch", "api", "", "v1", "other", "pods", "", "foo", []string{"pods", "foo"}},
 		{"DELETE", "/api/v1/namespaces/other/pods/foo", "delete", "api", "", "v1", "other", "pods", "", "foo", []string{"pods", "foo"}},
 		{"POST", "/api/v1/namespaces/other/pods", "create", "api", "", "v1", "other", "pods", "", "", []string{"pods"}},
+
+		// deletecollection verb identification
+		{"DELETE", "/api/v1/nodes", "deletecollection", "api", "", "v1", "", "nodes", "", "", []string{"nodes"}},
+		{"DELETE", "/api/v1/namespaces", "deletecollection", "api", "", "v1", "", "namespaces", "", "", []string{"namespaces"}},
+		{"DELETE", "/api/v1/namespaces/other/pods", "deletecollection", "api", "", "v1", "other", "pods", "", "", []string{"pods"}},
+		{"DELETE", "/apis/extensions/v1/namespaces/other/pods", "deletecollection", "api", "extensions", "v1", "other", "pods", "", "", []string{"pods"}},
 
 		// api group identification
 		{"POST", "/apis/extensions/v1/namespaces/other/pods", "create", "api", "extensions", "v1", "other", "pods", "", "", []string{"pods"}},

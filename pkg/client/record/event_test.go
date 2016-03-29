@@ -19,23 +19,19 @@ package record
 import (
 	"encoding/json"
 	"fmt"
-	"runtime"
+	"math/rand"
 	"strconv"
 	"testing"
 	"time"
 
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/errors"
-	client "k8s.io/kubernetes/pkg/client/unversioned"
+	_ "k8s.io/kubernetes/pkg/api/install" // To register api.Pod used in tests below
+	"k8s.io/kubernetes/pkg/client/restclient"
 	k8sruntime "k8s.io/kubernetes/pkg/runtime"
 	"k8s.io/kubernetes/pkg/util"
 	"k8s.io/kubernetes/pkg/util/strategicpatch"
 )
-
-func init() {
-	// Don't bother sleeping between retries.
-	sleepDuration = 0
-}
 
 type testEventSink struct {
 	OnCreate func(e *api.Event) (*api.Event, error)
@@ -345,10 +341,10 @@ func TestEventf(t *testing.T) {
 		},
 		OnPatch: OnPatchFactory(testCache, patchEvent),
 	}
-	eventBroadcaster := NewBroadcaster()
+	eventBroadcaster := NewBroadcasterForTests(0)
 	sinkWatcher := eventBroadcaster.StartRecordingToSink(&testEvents)
 
-	clock := &util.FakeClock{time.Now()}
+	clock := util.NewFakeClock(time.Now())
 	recorder := recorderWithFakeClock(api.EventSource{Component: "eventTest"}, eventBroadcaster, clock)
 	for index, item := range table {
 		clock.Step(1 * time.Second)
@@ -382,16 +378,8 @@ func recorderWithFakeClock(eventSource api.EventSource, eventBroadcaster EventBr
 }
 
 func TestWriteEventError(t *testing.T) {
-	ref := &api.ObjectReference{
-		Kind:       "Pod",
-		Name:       "foo",
-		Namespace:  "baz",
-		UID:        "bar",
-		APIVersion: "version",
-	}
 	type entry struct {
 		timesToSendError int
-		attemptsMade     int
 		attemptsWanted   int
 		err              error
 	}
@@ -399,7 +387,7 @@ func TestWriteEventError(t *testing.T) {
 		"giveUp1": {
 			timesToSendError: 1000,
 			attemptsWanted:   1,
-			err:              &client.RequestConstructionError{},
+			err:              &restclient.RequestConstructionError{},
 		},
 		"giveUp2": {
 			timesToSendError: 1000,
@@ -422,42 +410,25 @@ func TestWriteEventError(t *testing.T) {
 			err:              fmt.Errorf("A weird error"),
 		},
 	}
-	done := make(chan struct{})
 
-	eventBroadcaster := NewBroadcaster()
-	defer eventBroadcaster.StartRecordingToSink(
-		&testEventSink{
+	eventCorrelator := NewEventCorrelator(util.RealClock{})
+	randGen := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	for caseName, ent := range table {
+		attempts := 0
+		sink := &testEventSink{
 			OnCreate: func(event *api.Event) (*api.Event, error) {
-				if event.Message == "finished" {
-					close(done)
-					return event, nil
-				}
-				item, ok := table[event.Message]
-				if !ok {
-					t.Errorf("Unexpected event: %#v", event)
-					return event, nil
-				}
-				item.attemptsMade++
-				if item.attemptsMade < item.timesToSendError {
-					return nil, item.err
+				attempts++
+				if attempts < ent.timesToSendError {
+					return nil, ent.err
 				}
 				return event, nil
 			},
-		},
-	).Stop()
-	clock := &util.FakeClock{time.Now()}
-	recorder := recorderWithFakeClock(api.EventSource{Component: "eventTest"}, eventBroadcaster, clock)
-	for caseName := range table {
-		clock.Step(1 * time.Second)
-		recorder.Event(ref, api.EventTypeNormal, "Reason", caseName)
-		runtime.Gosched()
-	}
-	recorder.Event(ref, api.EventTypeNormal, "Reason", "finished")
-	<-done
-
-	for caseName, item := range table {
-		if e, a := item.attemptsWanted, item.attemptsMade; e != a {
-			t.Errorf("case %v: wanted %v, got %v attempts", caseName, e, a)
+		}
+		ev := &api.Event{}
+		recordToSink(sink, ev, eventCorrelator, randGen, 0)
+		if attempts != ent.attemptsWanted {
+			t.Errorf("case %v: wanted %d, got %d attempts", caseName, ent.attemptsWanted, attempts)
 		}
 	}
 }
@@ -484,7 +455,7 @@ func TestLotsOfEvents(t *testing.T) {
 		},
 	}
 
-	eventBroadcaster := NewBroadcaster()
+	eventBroadcaster := NewBroadcasterForTests(0)
 	sinkWatcher := eventBroadcaster.StartRecordingToSink(&testEvents)
 	logWatcher := eventBroadcaster.StartLogging(func(formatter string, args ...interface{}) {
 		loggerCalled <- struct{}{}
@@ -581,10 +552,10 @@ func TestEventfNoNamespace(t *testing.T) {
 		},
 		OnPatch: OnPatchFactory(testCache, patchEvent),
 	}
-	eventBroadcaster := NewBroadcaster()
+	eventBroadcaster := NewBroadcasterForTests(0)
 	sinkWatcher := eventBroadcaster.StartRecordingToSink(&testEvents)
 
-	clock := &util.FakeClock{time.Now()}
+	clock := util.NewFakeClock(time.Now())
 	recorder := recorderWithFakeClock(api.EventSource{Component: "eventTest"}, eventBroadcaster, clock)
 
 	for index, item := range table {
@@ -870,8 +841,8 @@ func TestMultiSinkCache(t *testing.T) {
 		OnPatch: OnPatchFactory(testCache2, patchEvent2),
 	}
 
-	eventBroadcaster := NewBroadcaster()
-	clock := &util.FakeClock{time.Now()}
+	eventBroadcaster := NewBroadcasterForTests(0)
+	clock := util.NewFakeClock(time.Now())
 	recorder := recorderWithFakeClock(api.EventSource{Component: "eventTest"}, eventBroadcaster, clock)
 
 	sinkWatcher := eventBroadcaster.StartRecordingToSink(&testEvents)

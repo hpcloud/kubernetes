@@ -18,6 +18,8 @@ coreos:
   fleet:
     metadata: "role=node"
   units:
+    - name: etcd2.service
+      command: start
     - name: fleet.service
       command: start
     - name: flanneld.service
@@ -45,7 +47,7 @@ coreos:
       content: |
         [Unit]
         Description=Kubernetes Proxy
-        Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+        Documentation=https://github.com/kubernetes/kubernetes
         Requires=setup-network-environment.service
         After=setup-network-environment.service
 
@@ -64,7 +66,7 @@ coreos:
       content: |
         [Unit]
         Description=Kubernetes Kubelet
-        Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+        Documentation=https://github.com/kubernetes/kubernetes
         Requires=setup-network-environment.service
         After=setup-network-environment.service
 

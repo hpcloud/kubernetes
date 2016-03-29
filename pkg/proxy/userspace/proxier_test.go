@@ -31,8 +31,8 @@ import (
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/proxy"
 	"k8s.io/kubernetes/pkg/types"
-	"k8s.io/kubernetes/pkg/util"
 	ipttest "k8s.io/kubernetes/pkg/util/iptables/testing"
+	"k8s.io/kubernetes/pkg/util/runtime"
 )
 
 const (
@@ -87,9 +87,10 @@ var udpServerPort int
 
 func init() {
 	// Don't handle panics
-	util.ReallyCrash = true
+	runtime.ReallyCrash = true
 
 	// TCP setup.
+	// TODO: Close() this when fix #19254
 	tcp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(r.URL.Path[1:]))

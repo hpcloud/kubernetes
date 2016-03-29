@@ -25,14 +25,13 @@ import (
 	"runtime"
 
 	"k8s.io/kubernetes/pkg/api"
+	_ "k8s.io/kubernetes/pkg/api/install"
 	"k8s.io/kubernetes/pkg/api/unversioned"
-	_ "k8s.io/kubernetes/pkg/api/v1"
-	_ "k8s.io/kubernetes/pkg/apis/componentconfig"
-	_ "k8s.io/kubernetes/pkg/apis/componentconfig/v1alpha1"
-	_ "k8s.io/kubernetes/pkg/apis/extensions"
-	_ "k8s.io/kubernetes/pkg/apis/extensions/v1beta1"
-	_ "k8s.io/kubernetes/pkg/apis/metrics"
-	_ "k8s.io/kubernetes/pkg/apis/metrics/v1alpha1"
+	_ "k8s.io/kubernetes/pkg/apis/autoscaling/install"
+	_ "k8s.io/kubernetes/pkg/apis/batch/install"
+	_ "k8s.io/kubernetes/pkg/apis/componentconfig/install"
+	_ "k8s.io/kubernetes/pkg/apis/extensions/install"
+	_ "k8s.io/kubernetes/pkg/apis/metrics/install"
 	kruntime "k8s.io/kubernetes/pkg/runtime"
 	"k8s.io/kubernetes/pkg/util/sets"
 
@@ -84,17 +83,21 @@ func main() {
 
 	data := new(bytes.Buffer)
 
-	gv := unversioned.ParseGroupVersionOrDie(*groupVersion)
+	gv, err := unversioned.ParseGroupVersion(*groupVersion)
+	if err != nil {
+		glog.Fatalf("Error parsing groupversion %v: %v", *groupVersion, err)
+	}
 
-	_, err := data.WriteString(fmt.Sprintf("package %v\n", gv.Version))
+	_, err = data.WriteString(fmt.Sprintf("package %v\n", gv.Version))
 	if err != nil {
 		glog.Fatalf("Error while writing package line: %v", err)
 	}
 
 	versionPath := pkgPath(gv.Group, gv.Version)
-	generator := kruntime.NewConversionGenerator(api.Scheme.Raw(), versionPath)
+	generator := kruntime.NewConversionGenerator(api.Scheme, versionPath)
 	apiShort := generator.AddImport(path.Join(pkgBase, "api"))
 	generator.AddImport(path.Join(pkgBase, "api/resource"))
+	generator.AddImport(path.Join(pkgBase, "types"))
 	// TODO(wojtek-t): Change the overwrites to a flag.
 	generator.OverwritePackage(gv.Version, "")
 	for _, knownType := range api.Scheme.KnownTypes(gv) {
@@ -118,7 +121,10 @@ func main() {
 
 	b, err := imports.Process("", data.Bytes(), nil)
 	if err != nil {
-		glog.Fatalf("Error while update imports: %v", err)
+		for i, s := range bytes.Split(data.Bytes(), []byte("\n")) {
+			glog.Infof("%d:\t%s", i, s)
+		}
+		glog.Fatalf("Error while update imports: %v\n", err)
 	}
 	if _, err := funcOut.Write(b); err != nil {
 		glog.Fatalf("Error while writing out the resulting file: %v", err)

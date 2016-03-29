@@ -24,10 +24,8 @@ import (
 	cadvisorapi "github.com/google/cadvisor/info/v1"
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/resource"
-	"k8s.io/kubernetes/pkg/api/unversioned"
 	client "k8s.io/kubernetes/pkg/client/unversioned"
 	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/util/wait"
 
 	. "github.com/onsi/ginkgo"
@@ -46,14 +44,14 @@ const (
 	// flag value affects all the e2e tests. So we are hard-coding this value for now.
 	lowDiskSpaceThreshold uint64 = 256 * mb
 
-	nodeOODTimeOut = 1 * time.Minute
+	nodeOODTimeOut = 5 * time.Minute
 
 	numNodeOODPods = 3
 )
 
 // Plan:
 // 1. Fill disk space on all nodes except one. One node is left out so that we can schedule pods
-//    on that node. Arbitrarily choose that node to be node with index 0.
+//    on that node. Arbitrarily choose that node to be node with index 0.  This makes this a disruptive test.
 // 2. Get the CPU capacity on unfilled node.
 // 3. Divide the available CPU into one less than the number of pods we want to schedule. We want
 //    to schedule 3 pods, so divide CPU capacity by 2.
@@ -65,18 +63,20 @@ const (
 //    choose that node to be node with index 1.
 // 7. Observe that the pod in pending status schedules on that node.
 //
-var _ = Describe("NodeOutOfDisk", func() {
+// Flaky issue #20015.  We have no clear path for how to test this functionality in a non-flaky way.
+var _ = KubeDescribe("NodeOutOfDisk [Serial] [Flaky] [Disruptive]", func() {
 	var c *client.Client
 	var unfilledNodeName, recoveredNodeName string
-	framework := Framework{BaseName: "node-outofdisk"}
+	framework := NewDefaultFramework("node-outofdisk")
 
 	BeforeEach(func() {
-		framework.beforeEach()
 		c = framework.Client
 
-		nodelist, err := listNodes(c, labels.Everything(), fields.Everything())
-		expectNoError(err, "Error retrieving nodes")
-		Expect(len(nodelist.Items)).To(BeNumerically(">", 1))
+		nodelist := ListSchedulableNodesOrDie(c)
+
+		// Skip this test on small clusters.  No need to fail since it is not a use
+		// case that any cluster of small size needs to support.
+		SkipUnlessNodeCountIsAtLeast(2)
 
 		unfilledNodeName = nodelist.Items[0].Name
 		for _, node := range nodelist.Items[1:] {
@@ -85,10 +85,8 @@ var _ = Describe("NodeOutOfDisk", func() {
 	})
 
 	AfterEach(func() {
-		defer framework.afterEach()
 
-		nodelist, err := listNodes(c, labels.Everything(), fields.Everything())
-		expectNoError(err, "Error retrieving nodes")
+		nodelist := ListSchedulableNodesOrDie(c)
 		Expect(len(nodelist.Items)).ToNot(BeZero())
 		for _, node := range nodelist.Items {
 			if unfilledNodeName == node.Name || recoveredNodeName == node.Name {
@@ -137,10 +135,10 @@ var _ = Describe("NodeOutOfDisk", func() {
 				"involvedObject.kind":      "Pod",
 				"involvedObject.name":      pendingPodName,
 				"involvedObject.namespace": ns,
-				"source":                   "scheduler",
+				"source":                   api.DefaultSchedulerName,
 				"reason":                   "FailedScheduling",
 			}.AsSelector()
-			options := unversioned.ListOptions{FieldSelector: unversioned.FieldSelector{selector}}
+			options := api.ListOptions{FieldSelector: selector}
 			schedEvents, err := c.Events(ns).List(options)
 			expectNoError(err)
 
@@ -151,8 +149,7 @@ var _ = Describe("NodeOutOfDisk", func() {
 			}
 		})
 
-		nodelist, err := listNodes(c, labels.Everything(), fields.Everything())
-		expectNoError(err, "Error retrieving nodes")
+		nodelist := ListSchedulableNodesOrDie(c)
 		Expect(len(nodelist.Items)).To(BeNumerically(">", 1))
 
 		nodeToRecover := nodelist.Items[1]
@@ -203,7 +200,7 @@ func availCpu(c *client.Client, node *api.Node) (int64, error) {
 	podClient := c.Pods(api.NamespaceAll)
 
 	selector := fields.Set{"spec.nodeName": node.Name}.AsSelector()
-	options := unversioned.ListOptions{FieldSelector: unversioned.FieldSelector{selector}}
+	options := api.ListOptions{FieldSelector: selector}
 	pods, err := podClient.List(options)
 	if err != nil {
 		return 0, fmt.Errorf("failed to retrieve all the pods on node %s: %v", node.Name, err)
@@ -222,7 +219,7 @@ func availCpu(c *client.Client, node *api.Node) (int64, error) {
 func availSize(c *client.Client, node *api.Node) (uint64, error) {
 	statsResource := fmt.Sprintf("api/v1/proxy/nodes/%s/stats/", node.Name)
 	Logf("Querying stats for node %s using url %s", node.Name, statsResource)
-	res, err := c.Get().AbsPath(statsResource).Timeout(timeout).Do().Raw()
+	res, err := c.Get().AbsPath(statsResource).Timeout(time.Minute).Do().Raw()
 	if err != nil {
 		return 0, fmt.Errorf("error querying cAdvisor API: %v", err)
 	}

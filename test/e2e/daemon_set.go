@@ -25,10 +25,12 @@ import (
 	"k8s.io/kubernetes/pkg/api"
 	apierrs "k8s.io/kubernetes/pkg/api/errors"
 	"k8s.io/kubernetes/pkg/api/unversioned"
+	"k8s.io/kubernetes/pkg/apimachinery/registered"
 	"k8s.io/kubernetes/pkg/apis/extensions"
 	client "k8s.io/kubernetes/pkg/client/unversioned"
 	"k8s.io/kubernetes/pkg/kubectl"
 	"k8s.io/kubernetes/pkg/labels"
+	"k8s.io/kubernetes/pkg/runtime"
 	"k8s.io/kubernetes/pkg/util/wait"
 
 	. "github.com/onsi/ginkgo"
@@ -39,24 +41,39 @@ const (
 	// this should not be a multiple of 5, because node status updates
 	// every 5 seconds. See https://github.com/kubernetes/kubernetes/pull/14915.
 	dsRetryPeriod  = 2 * time.Second
-	dsRetryTimeout = 1 * time.Minute
+	dsRetryTimeout = 5 * time.Minute
 
 	daemonsetLabelPrefix = "daemonset-"
 	daemonsetNameLabel   = daemonsetLabelPrefix + "name"
 	daemonsetColorLabel  = daemonsetLabelPrefix + "color"
 )
 
-var _ = Describe("Daemon set", func() {
+// This test must be run in serial because it assumes the Daemon Set pods will
+// always get scheduled.  If we run other tests in parallel, this may not
+// happen.  In the future, running in parallel may work if we have an eviction
+// model which lets the DS controller kick out other pods to make room.
+// See http://issues.k8s.io/21767 for more details
+var _ = KubeDescribe("Daemon set [Serial]", func() {
 	var f *Framework
 
 	AfterEach(func() {
+		if daemonsets, err := f.Client.DaemonSets(f.Namespace.Name).List(api.ListOptions{}); err == nil {
+			Logf("daemonset: %s", runtime.EncodeOrDie(api.Codecs.LegacyCodec(registered.EnabledVersions()...), daemonsets))
+		} else {
+			Logf("unable to dump daemonsets: %v", err)
+		}
+		if pods, err := f.Client.Pods(f.Namespace.Name).List(api.ListOptions{}); err == nil {
+			Logf("pods: %s", runtime.EncodeOrDie(api.Codecs.LegacyCodec(registered.EnabledVersions()...), pods))
+		} else {
+			Logf("unable to dump pods: %v", err)
+		}
 		err := clearDaemonSetNodeLabels(f.Client)
 		Expect(err).NotTo(HaveOccurred())
 	})
 
-	f = NewFramework("daemonsets")
+	f = NewDefaultFramework("daemonsets")
 
-	image := "gcr.io/google_containers/serve_hostname:1.1"
+	image := "gcr.io/google_containers/serve_hostname:v1.4"
 	dsName := "daemon-set"
 
 	var ns string
@@ -78,7 +95,7 @@ var _ = Describe("Daemon set", func() {
 				Name: dsName,
 			},
 			Spec: extensions.DaemonSetSpec{
-				Template: &api.PodTemplateSpec{
+				Template: api.PodTemplateSpec{
 					ObjectMeta: api.ObjectMeta{
 						Labels: label,
 					},
@@ -114,7 +131,7 @@ var _ = Describe("Daemon set", func() {
 		podClient := c.Pods(ns)
 
 		selector := labels.Set(label).AsSelector()
-		options := unversioned.ListOptions{LabelSelector: unversioned.LabelSelector{selector}}
+		options := api.ListOptions{LabelSelector: selector}
 		podList, err := podClient.List(options)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(len(podList.Items)).To(BeNumerically(">", 0))
@@ -135,8 +152,8 @@ var _ = Describe("Daemon set", func() {
 				Name: dsName,
 			},
 			Spec: extensions.DaemonSetSpec{
-				Selector: &extensions.LabelSelector{MatchLabels: complexLabel},
-				Template: &api.PodTemplateSpec{
+				Selector: &unversioned.LabelSelector{MatchLabels: complexLabel},
+				Template: api.PodTemplateSpec{
 					ObjectMeta: api.ObjectMeta{
 						Labels: complexLabel,
 					},
@@ -160,8 +177,7 @@ var _ = Describe("Daemon set", func() {
 		Expect(err).NotTo(HaveOccurred(), "error waiting for daemon pods to be running on no nodes")
 
 		By("Change label of node, check that daemon pod is launched.")
-		nodeClient := c.Nodes()
-		nodeList, err := nodeClient.List(unversioned.ListOptions{})
+		nodeList := ListSchedulableNodesOrDie(f.Client)
 		Expect(len(nodeList.Items)).To(BeNumerically(">", 0))
 		newNode, err := setDaemonSetNodeLabels(c, nodeList.Items[0].Name, nodeSelector)
 		Expect(err).NotTo(HaveOccurred(), "error setting labels on node")
@@ -196,11 +212,7 @@ func separateDaemonSetNodeLabels(labels map[string]string) (map[string]string, m
 }
 
 func clearDaemonSetNodeLabels(c *client.Client) error {
-	nodeClient := c.Nodes()
-	nodeList, err := nodeClient.List(unversioned.ListOptions{})
-	if err != nil {
-		return err
-	}
+	nodeList := ListSchedulableNodesOrDie(c)
 	for _, node := range nodeList.Items {
 		_, err := setDaemonSetNodeLabels(c, node.Name, map[string]string{})
 		if err != nil {
@@ -253,7 +265,7 @@ func setDaemonSetNodeLabels(c *client.Client, nodeName string, labels map[string
 func checkDaemonPodOnNodes(f *Framework, selector map[string]string, nodeNames []string) func() (bool, error) {
 	return func() (bool, error) {
 		selector := labels.Set(selector).AsSelector()
-		options := unversioned.ListOptions{LabelSelector: unversioned.LabelSelector{selector}}
+		options := api.ListOptions{LabelSelector: selector}
 		podList, err := f.Client.Pods(f.Namespace.Name).List(options)
 		if err != nil {
 			return false, nil
@@ -282,10 +294,8 @@ func checkDaemonPodOnNodes(f *Framework, selector map[string]string, nodeNames [
 
 func checkRunningOnAllNodes(f *Framework, selector map[string]string) func() (bool, error) {
 	return func() (bool, error) {
-		nodeList, err := f.Client.Nodes().List(unversioned.ListOptions{})
-		if err != nil {
-			return false, nil
-		}
+		nodeList, err := f.Client.Nodes().List(api.ListOptions{})
+		expectNoError(err)
 		nodeNames := make([]string, 0)
 		for _, node := range nodeList.Items {
 			nodeNames = append(nodeNames, node.Name)

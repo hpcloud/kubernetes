@@ -21,6 +21,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/golang/glog"
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/endpoints"
 	"k8s.io/kubernetes/pkg/api/errors"
@@ -32,8 +33,9 @@ import (
 	portallocatorcontroller "k8s.io/kubernetes/pkg/registry/service/portallocator/controller"
 	"k8s.io/kubernetes/pkg/util"
 	"k8s.io/kubernetes/pkg/util/intstr"
-
-	"github.com/golang/glog"
+	utilnet "k8s.io/kubernetes/pkg/util/net"
+	"k8s.io/kubernetes/pkg/util/runtime"
+	"k8s.io/kubernetes/pkg/util/wait"
 )
 
 // Controller is the controller manager for the core bootstrap Kubernetes controller
@@ -51,7 +53,7 @@ type Controller struct {
 
 	ServiceNodePortRegistry service.RangeRegistry
 	ServiceNodePortInterval time.Duration
-	ServiceNodePortRange    util.PortRange
+	ServiceNodePortRange    utilnet.PortRange
 
 	EndpointRegistry endpoint.Registry
 	EndpointInterval time.Duration
@@ -98,12 +100,12 @@ func (c *Controller) Start() {
 
 // RunKubernetesService periodically updates the kubernetes service
 func (c *Controller) RunKubernetesService(ch chan struct{}) {
-	util.Until(func() {
+	wait.Until(func() {
 		// Service definition is not reconciled after first
 		// run, ports and type will be corrected only during
 		// start.
 		if err := c.UpdateKubernetesService(false); err != nil {
-			util.HandleError(fmt.Errorf("unable to sync kubernetes service: %v", err))
+			runtime.HandleError(fmt.Errorf("unable to sync kubernetes service: %v", err))
 		}
 	}, c.EndpointInterval, ch)
 }
@@ -208,7 +210,7 @@ func (c *Controller) CreateOrUpdateMasterServiceIfNeeded(serviceName string, ser
 			// maintained by this code, not by the pod selector
 			Selector:        nil,
 			ClusterIP:       serviceIP.String(),
-			SessionAffinity: api.ServiceAffinityNone,
+			SessionAffinity: api.ServiceAffinityClientIP,
 			Type:            serviceType,
 		},
 	}

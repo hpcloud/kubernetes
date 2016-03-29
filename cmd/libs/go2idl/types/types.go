@@ -72,6 +72,9 @@ const (
 	DeclarationOf Kind = "DeclarationOf"
 	Unknown       Kind = ""
 	Unsupported   Kind = "Unsupported"
+
+	// Protobuf is protobuf type.
+	Protobuf Kind = "Protobuf"
 )
 
 // Package holds package-level information.
@@ -230,6 +233,23 @@ type Type struct {
 	// If there are comment lines immediately before the type definition,
 	// they will be recorded here.
 	CommentLines string
+
+	// If there are comment lines preceding the `CommentLines`, they will be
+	// recorded here. There are two cases:
+	// ---
+	// SecondClosestCommentLines
+	// a blank line
+	// CommentLines
+	// type definition
+	// ---
+	//
+	// or
+	// ---
+	// SecondClosestCommentLines
+	// a blank line
+	// type definition
+	// ---
+	SecondClosestCommentLines string
 
 	// If Kind == Struct
 	Members []Member
@@ -397,3 +417,12 @@ var (
 		Name:    "",
 	}
 )
+
+func IsInteger(t *Type) bool {
+	switch t {
+	case Int, Int64, Int32, Int16, Uint, Uint64, Uint32, Uint16, Byte:
+		return true
+	default:
+		return false
+	}
+}

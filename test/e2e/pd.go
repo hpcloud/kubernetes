@@ -18,17 +18,22 @@ package e2e
 
 import (
 	"fmt"
-	"google.golang.org/api/googleapi"
 	mathrand "math/rand"
 	"strings"
 	"time"
 
+	"google.golang.org/api/googleapi"
+
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/awserr"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/ec2"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/latest"
 	"k8s.io/kubernetes/pkg/api/resource"
 	"k8s.io/kubernetes/pkg/api/unversioned"
+	"k8s.io/kubernetes/pkg/apimachinery/registered"
 	client "k8s.io/kubernetes/pkg/client/unversioned"
 	awscloud "k8s.io/kubernetes/pkg/cloudprovider/providers/aws"
 	gcecloud "k8s.io/kubernetes/pkg/cloudprovider/providers/gce"
@@ -40,21 +45,19 @@ const (
 	gcePDDetachPollTime = 10 * time.Second
 )
 
-var _ = Describe("Pod Disks", func() {
+var _ = KubeDescribe("Pod Disks", func() {
 	var (
 		podClient client.PodInterface
 		host0Name string
 		host1Name string
 	)
-	framework := NewFramework("pod-disks")
+	framework := NewDefaultFramework("pod-disks")
 
 	BeforeEach(func() {
 		SkipUnlessNodeCountIsAtLeast(2)
 
 		podClient = framework.Client.Pods(framework.Namespace.Name)
-
-		nodes, err := framework.Client.Nodes().List(unversioned.ListOptions{})
-		expectNoError(err, "Failed to list nodes for e2e cluster.")
+		nodes := ListSchedulableNodesOrDie(framework.Client)
 
 		Expect(len(nodes.Items)).To(BeNumerically(">=", 2), "Requires at least 2 nodes")
 
@@ -64,7 +67,7 @@ var _ = Describe("Pod Disks", func() {
 		mathrand.Seed(time.Now().UTC().UnixNano())
 	})
 
-	It("should schedule a pod w/ a RW PD, remove it, then schedule it on another host", func() {
+	It("should schedule a pod w/ a RW PD, remove it, then schedule it on another host [Slow]", func() {
 		SkipUnlessProviderIs("gce", "gke", "aws")
 
 		By("creating PD")
@@ -117,7 +120,7 @@ var _ = Describe("Pod Disks", func() {
 		return
 	})
 
-	It("should schedule a pod w/ a readonly PD on two hosts, then remove both.", func() {
+	It("should schedule a pod w/ a readonly PD on two hosts, then remove both. [Slow]", func() {
 		SkipUnlessProviderIs("gce", "gke")
 
 		By("creating PD")
@@ -164,7 +167,7 @@ var _ = Describe("Pod Disks", func() {
 		expectNoError(podClient.Delete(host1ROPod.Name, api.NewDeleteOptions(0)), "Failed to delete host1ROPod")
 	})
 
-	It("should schedule a pod w/ a RW PD shared between multiple containers, write to PD, delete pod, verify contents, and repeat in rapid succession", func() {
+	It("should schedule a pod w/ a RW PD shared between multiple containers, write to PD, delete pod, verify contents, and repeat in rapid succession [Slow]", func() {
 		SkipUnlessProviderIs("gce", "gke", "aws")
 
 		By("creating PD")
@@ -212,7 +215,7 @@ var _ = Describe("Pod Disks", func() {
 		}
 	})
 
-	It("should schedule a pod w/two RW PDs both mounted to one container, write to PD, verify contents, delete pod, recreate pod, verify contents, and repeat in rapid succession", func() {
+	It("should schedule a pod w/two RW PDs both mounted to one container, write to PD, verify contents, delete pod, recreate pod, verify contents, and repeat in rapid succession [Slow]", func() {
 		SkipUnlessProviderIs("gce", "gke", "aws")
 
 		By("creating PD1")
@@ -315,19 +318,31 @@ func createPD() (string, error) {
 			return "", err
 		}
 
-		err = gceCloud.CreateDisk(pdName, 10 /* sizeGb */)
+		tags := map[string]string{}
+		err = gceCloud.CreateDisk(pdName, testContext.CloudConfig.Zone, 10 /* sizeGb */, tags)
 		if err != nil {
 			return "", err
 		}
 		return pdName, nil
-	} else {
-		volumes, ok := testContext.CloudConfig.Provider.(awscloud.Volumes)
-		if !ok {
-			return "", fmt.Errorf("Provider does not support volumes")
+	} else if testContext.Provider == "aws" {
+		client := ec2.New(session.New())
+
+		request := &ec2.CreateVolumeInput{}
+		request.AvailabilityZone = aws.String(cloudConfig.Zone)
+		request.Size = aws.Int64(10)
+		request.VolumeType = aws.String(awscloud.DefaultVolumeType)
+		response, err := client.CreateVolume(request)
+		if err != nil {
+			return "", err
 		}
-		volumeOptions := &awscloud.VolumeOptions{}
-		volumeOptions.CapacityMB = 10 * 1024
-		return volumes.CreateVolume(volumeOptions)
+
+		az := aws.StringValue(response.AvailabilityZone)
+		awsID := aws.StringValue(response.VolumeId)
+
+		volumeName := "aws://" + az + "/" + awsID
+		return volumeName, nil
+	} else {
+		return "", fmt.Errorf("Provider does not support volume creation")
 	}
 }
 
@@ -349,12 +364,24 @@ func deletePD(pdName string) error {
 			Logf("Error deleting PD %q: %v", pdName, err)
 		}
 		return err
-	} else {
-		volumes, ok := testContext.CloudConfig.Provider.(awscloud.Volumes)
-		if !ok {
-			return fmt.Errorf("Provider does not support volumes")
+	} else if testContext.Provider == "aws" {
+		client := ec2.New(session.New())
+
+		tokens := strings.Split(pdName, "/")
+		awsVolumeID := tokens[len(tokens)-1]
+
+		request := &ec2.DeleteVolumeInput{VolumeId: aws.String(awsVolumeID)}
+		_, err := client.DeleteVolume(request)
+		if err != nil {
+			if awsError, ok := err.(awserr.Error); ok && awsError.Code() == "InvalidVolume.NotFound" {
+				Logf("Volume deletion implicitly succeeded because volume %q does not exist.", pdName)
+			} else {
+				return fmt.Errorf("error deleting EBS volumes: %v", err)
+			}
 		}
-		return volumes.DeleteVolume(pdName)
+		return nil
+	} else {
+		return fmt.Errorf("Provider does not support volume deletion")
 	}
 }
 
@@ -378,13 +405,23 @@ func detachPD(hostName, pdName string) error {
 		}
 
 		return err
+	} else if testContext.Provider == "aws" {
+		client := ec2.New(session.New())
 
-	} else {
-		volumes, ok := testContext.CloudConfig.Provider.(awscloud.Volumes)
-		if !ok {
-			return fmt.Errorf("Provider does not support volumes")
+		tokens := strings.Split(pdName, "/")
+		awsVolumeID := tokens[len(tokens)-1]
+
+		request := ec2.DetachVolumeInput{
+			VolumeId: aws.String(awsVolumeID),
 		}
-		return volumes.DetachDisk(hostName, pdName)
+
+		_, err := client.DetachVolume(&request)
+		if err != nil {
+			return fmt.Errorf("error detaching EBS volume: %v", err)
+		}
+		return nil
+	} else {
+		return fmt.Errorf("Provider does not support volume detaching")
 	}
 }
 
@@ -396,7 +433,7 @@ func testPDPod(diskNames []string, targetHost string, readOnly bool, numContaine
 			containers[i].Name = fmt.Sprintf("mycontainer%v", i+1)
 		}
 
-		containers[i].Image = "gcr.io/google_containers/busybox"
+		containers[i].Image = "gcr.io/google_containers/busybox:1.24"
 
 		containers[i].Command = []string{"sleep", "6000"}
 
@@ -414,7 +451,7 @@ func testPDPod(diskNames []string, targetHost string, readOnly bool, numContaine
 	pod := &api.Pod{
 		TypeMeta: unversioned.TypeMeta{
 			Kind:       "Pod",
-			APIVersion: latest.GroupOrDie("").GroupVersion.Version,
+			APIVersion: registered.GroupOrDie(api.GroupName).GroupVersion.String(),
 		},
 		ObjectMeta: api.ObjectMeta{
 			Name: "pd-test-" + string(util.NewUUID()),

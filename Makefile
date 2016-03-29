@@ -1,3 +1,17 @@
+# Copyright 2016 The Kubernetes Authors All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 # Old-skool build tools.
 #
 # Targets (see each target for more information):
@@ -41,17 +55,7 @@ all:
 #   make verify
 #   make verify BRANCH=branch_x
 verify:
-	hack/verify-gofmt.sh
-	hack/verify-boilerplate.sh
-	hack/verify-codecgen.sh
-	hack/verify-description.sh
-	hack/verify-generated-conversions.sh
-	hack/verify-generated-deep-copies.sh
-	hack/verify-generated-docs.sh
-	hack/verify-swagger-spec.sh
-	hack/verify-linkcheck.sh
-	hack/verify-flags-underscore.py
-	hack/verify-godeps.sh $(BRANCH)
+	KUBE_VERIFY_GIT_BRANCH=$(BRANCH) hack/verify-all.sh -v
 .PHONY: verify
 
 # Build and run tests.
@@ -84,8 +88,17 @@ test_integration:
 # Example:
 #   make test_e2e
 test_e2e:
-	hack/e2e-test.sh
+	go run hack/e2e.go -v --build --up --test --down
 .PHONY: test_e2e
+
+# Build and run node end-to-end tests.
+#
+# Example:
+#   make test_e2e_node
+test_e2e_node:
+	hack/e2e-node-test.sh
+.PHONY: test_e2e_node
+
 
 # Remove all build artifacts.
 #
@@ -127,6 +140,6 @@ release:
 # Example:
 #   make release-skip-tests
 release-skip-tests quick-release:
-	KUBE_RELEASE_RUN_TESTS=n build/release.sh
+	KUBE_RELEASE_RUN_TESTS=n KUBE_FASTBUILD=true build/release.sh
 .PHONY: release-skip-tests quick-release
 

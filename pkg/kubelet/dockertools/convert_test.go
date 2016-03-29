@@ -51,7 +51,7 @@ func TestToRuntimeContainer(t *testing.T) {
 		Status:  "Up 5 hours",
 	}
 	expected := &kubecontainer.Container{
-		ID:      kubecontainer.ContainerID{"docker", "ab2cdf"},
+		ID:      kubecontainer.ContainerID{Type: "docker", ID: "ab2cdf"},
 		Name:    "bar",
 		Image:   "bar_image",
 		Hash:    0x5678,
@@ -75,9 +75,9 @@ func TestToRuntimeImage(t *testing.T) {
 		VirtualSize: 1234,
 	}
 	expected := &kubecontainer.Image{
-		ID:   "aeeea",
-		Tags: []string{"abc", "def"},
-		Size: 1234,
+		ID:       "aeeea",
+		RepoTags: []string{"abc", "def"},
+		Size:     1234,
 	}
 
 	actual, err := toRuntimeImage(original)

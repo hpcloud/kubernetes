@@ -31,21 +31,21 @@ import (
 const (
 	autoscaleLong = `Creates an autoscaler that automatically chooses and sets the number of pods that run in a kubernetes cluster.
 
-Looks up a deployment or replication controller by name and creates an autoscaler that uses this deployment or replication controller as a reference.
+Looks up a Deployment, ReplicaSet, or ReplicationController by name and creates an autoscaler that uses the given resource as a reference.
 An autoscaler can automatically increase or decrease number of pods deployed within the system as needed.`
 
 	autoscaleExample = `# Auto scale a deployment "foo", with the number of pods between 2 to 10, target CPU utilization at a default value that server applies:
-$ kubectl autoscale deployment foo --min=2 --max=10
+kubectl autoscale deployment foo --min=2 --max=10
 
 # Auto scale a replication controller "foo", with the number of pods between 1 to 5, target CPU utilization at 80%:
-$ kubectl autoscale rc foo --max=5 --cpu-percent=80`
+kubectl autoscale rc foo --max=5 --cpu-percent=80`
 )
 
 func NewCmdAutoscale(f *cmdutil.Factory, out io.Writer) *cobra.Command {
 	filenames := []string{}
 	cmd := &cobra.Command{
 		Use:     "autoscale (-f FILENAME | TYPE NAME | TYPE/NAME) [--min=MINPODS] --max=MAXPODS [--cpu-percent=CPU] [flags]",
-		Short:   "Auto-scale a deployment or replication controller",
+		Short:   "Auto-scale a Deployment, ReplicaSet, or ReplicationController",
 		Long:    autoscaleLong,
 		Example: autoscaleExample,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -64,6 +64,7 @@ func NewCmdAutoscale(f *cmdutil.Factory, out io.Writer) *cobra.Command {
 	usage := "Filename, directory, or URL to a file identifying the resource to autoscale."
 	kubectl.AddJsonFilenameFlag(cmd, &filenames, usage)
 	cmdutil.AddApplyAnnotationFlags(cmd)
+	cmdutil.AddRecordFlag(cmd)
 	return cmd
 }
 
@@ -79,7 +80,7 @@ func RunAutoscale(f *cmdutil.Factory, out io.Writer, cmd *cobra.Command, args []
 	}
 
 	mapper, typer := f.Object()
-	r := resource.NewBuilder(mapper, typer, f.ClientMapperForCommand()).
+	r := resource.NewBuilder(mapper, typer, resource.ClientMapperFunc(f.ClientForMapping), f.Decoder(true)).
 		ContinueOnError().
 		NamespaceParam(namespace).DefaultNamespace().
 		FilenameParam(enforceNamespace, filenames...).
@@ -101,7 +102,8 @@ func RunAutoscale(f *cmdutil.Factory, out io.Writer, cmd *cobra.Command, args []
 
 	// Get the generator, setup and validate all required parameters
 	generatorName := cmdutil.GetFlagString(cmd, "generator")
-	generator, found := f.Generator(generatorName)
+	generators := f.Generators("autoscale")
+	generator, found := generators[generatorName]
 	if !found {
 		return cmdutil.UsageError(cmd, fmt.Sprintf("generator %q not found.", generatorName))
 	}
@@ -117,6 +119,10 @@ func RunAutoscale(f *cmdutil.Factory, out io.Writer, cmd *cobra.Command, args []
 	if err = kubectl.ValidateParams(names, params); err != nil {
 		return err
 	}
+	// Check for invalid flags used against the present generator.
+	if err := kubectl.EnsureFlagsValid(cmd, generators, generatorName); err != nil {
+		return err
+	}
 
 	// Generate new object
 	object, err := generator.Generate(params)
@@ -124,17 +130,28 @@ func RunAutoscale(f *cmdutil.Factory, out io.Writer, cmd *cobra.Command, args []
 		return err
 	}
 
-	resourceMapper := &resource.Mapper{ObjectTyper: typer, RESTMapper: mapper, ClientMapper: f.ClientMapperForCommand()}
-	hpa, err := resourceMapper.InfoForObject(object)
+	resourceMapper := &resource.Mapper{
+		ObjectTyper:  typer,
+		RESTMapper:   mapper,
+		ClientMapper: resource.ClientMapperFunc(f.ClientForMapping),
+		Decoder:      f.Decoder(true),
+	}
+	hpa, err := resourceMapper.InfoForObject(object, nil)
 	if err != nil {
 		return err
+	}
+	if cmdutil.ShouldRecord(cmd, hpa) {
+		if err := cmdutil.RecordChangeCause(hpa.Object, f.Command()); err != nil {
+			return err
+		}
+		object = hpa.Object
 	}
 	// TODO: extract this flag to a central location, when such a location exists.
 	if cmdutil.GetFlagBool(cmd, "dry-run") {
 		return f.PrintObject(cmd, object, out)
 	}
 
-	if err := kubectl.CreateOrUpdateAnnotation(cmdutil.GetFlagBool(cmd, cmdutil.ApplyAnnotationsFlag), hpa); err != nil {
+	if err := kubectl.CreateOrUpdateAnnotation(cmdutil.GetFlagBool(cmd, cmdutil.ApplyAnnotationsFlag), hpa, f.JSONEncoder()); err != nil {
 		return err
 	}
 

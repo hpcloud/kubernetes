@@ -14,6 +14,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+function prepare-package-manager() {
+  echo "Prepare package manager"
+
+  # Useful if a mirror is broken or slow
+  echo "fastestmirror=True" >> /etc/dnf/dnf.conf
+
+  # In Fedora 23, installed version does not work with Salt
+  # Cf. https://github.com/saltstack/salt/issues/31001
+  dnf update -y dnf dnf-plugins-core
+}
+
 function write-salt-config() {
   local role="$1"
 
@@ -38,6 +49,7 @@ instance_prefix: '$(echo "$INSTANCE_PREFIX" | sed -e "s/'/''/g")'
 admission_control: '$(echo "$ADMISSION_CONTROL" | sed -e "s/'/''/g")'
 enable_cpu_cfs_quota: '$(echo "$ENABLE_CPU_CFS_QUOTA" | sed -e "s/'/''/g")'
 network_provider: '$(echo "$NETWORK_PROVIDER" | sed -e "s/'/''/g")'
+cluster_cidr: '$(echo "$CLUSTER_IP_RANGE" | sed -e "s/'/''/g")'
 opencontrail_tag: '$(echo "$OPENCONTRAIL_TAG" | sed -e "s/'/''/g")'
 opencontrail_kubernetes_tag: '$(echo "$OPENCONTRAIL_KUBERNETES_TAG" | sed -e "s/'/''/g")'
 opencontrail_public_subnet: '$(echo "$OPENCONTRAIL_PUBLIC_SUBNET" | sed -e "s/'/''/g")'
@@ -95,6 +107,20 @@ function install-salt() {
   if ! which salt-call >/dev/null 2>&1; then
     # Install salt binaries
     curl -sS -L --connect-timeout 20 --retry 6 --retry-delay 10 https://bootstrap.saltstack.com | sh -s
+
+    # Fedora >= 23 includes salt packages but the bootstrap is
+    # creating configuration for a (non-existent) salt repo anyway.
+    # Remove the invalid repo to prevent dnf from warning about it on
+    # every update.  Assume this problem is specific to Fedora 23 and
+    # will fixed by the time another version of Fedora lands.
+    local fedora_version=$(grep 'VERSION_ID' /etc/os-release | sed 's+VERSION_ID=++')
+    if [[ "${fedora_version}" = '23' ]]; then
+      local repo_file='/etc/yum.repos.d/saltstack-salt-fedora-23.repo'
+      if [[ -f "${repo_file}" ]]; then
+        rm "${repo_file}"
+      fi
+    fi
+
   fi
 }
 

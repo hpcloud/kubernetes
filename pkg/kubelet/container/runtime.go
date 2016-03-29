@@ -17,7 +17,6 @@ limitations under the License.
 package container
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"reflect"
@@ -30,28 +29,6 @@ import (
 	"k8s.io/kubernetes/pkg/util"
 	"k8s.io/kubernetes/pkg/volume"
 )
-
-// Container Terminated and Kubelet is backing off the restart
-var ErrCrashLoopBackOff = errors.New("CrashLoopBackOff")
-
-var (
-	// Container image pull failed, kubelet is backing off image pull
-	ErrImagePullBackOff = errors.New("ImagePullBackOff")
-
-	// Unable to inspect image
-	ErrImageInspect = errors.New("ImageInspectError")
-
-	// General image pull error
-	ErrImagePull = errors.New("ErrImagePull")
-
-	// Required Image is absent on host and PullPolicy is NeverPullImage
-	ErrImageNeverPull = errors.New("ErrImageNeverPull")
-
-	// Get http error when pulling image from registry
-	RegistryUnavailable = errors.New("RegistryUnavailable")
-)
-
-var ErrRunContainer = errors.New("RunContainerError")
 
 type Version interface {
 	// Compare compares two versions of the runtime. On success it returns -1
@@ -78,6 +55,12 @@ type Runtime interface {
 
 	// Version returns the version information of the container runtime.
 	Version() (Version, error)
+	// APIVersion returns the API version information of the container
+	// runtime. This may be different from the runtime engine's version.
+	// TODO(random-liu): We should fold this into Version()
+	APIVersion() (Version, error)
+	// Status returns error if the runtime is unhealthy; nil otherwise.
+	Status() error
 	// GetPods returns a list containers group by pods. The boolean parameter
 	// specifies whether the runtime returns all containers including those already
 	// exited and dead containers (used for garbage collection).
@@ -85,27 +68,13 @@ type Runtime interface {
 	// GarbageCollect removes dead containers using the specified container gc policy
 	GarbageCollect(gcPolicy ContainerGCPolicy) error
 	// Syncs the running pod into the desired pod.
-	// TODO (random-liu) The runningPod will be removed after #17420 is done.
-	SyncPod(pod *api.Pod, runningPod Pod, apiPodStatus api.PodStatus, podStatus *PodStatus, pullSecrets []api.Secret, backOff *util.Backoff) error
+	SyncPod(pod *api.Pod, apiPodStatus api.PodStatus, podStatus *PodStatus, pullSecrets []api.Secret, backOff *util.Backoff) PodSyncResult
 	// KillPod kills all the containers of a pod. Pod may be nil, running pod must not be.
+	// TODO(random-liu): Return PodSyncResult in KillPod.
 	KillPod(pod *api.Pod, runningPod Pod) error
-	// GetAPIPodStatus retrieves the api.PodStatus of the pod, including the information of
-	// all containers in the pod. Clients of this interface assume the
-	// containers' statuses in a pod always have a deterministic ordering
-	// (e.g., sorted by name).
-	GetAPIPodStatus(*api.Pod) (*api.PodStatus, error)
 	// GetPodStatus retrieves the status of the pod, including the
 	// information of all containers in the pod that are visble in Runtime.
 	GetPodStatus(uid types.UID, name, namespace string) (*PodStatus, error)
-	// ConvertPodStatusToAPIPodStatus converts the PodStatus object to api.PodStatus.
-	// This function is needed because Docker generates some high-level and/or
-	// pod-level information for api.PodStatus (e.g., check whether the image
-	// exists to determine the reason). We should try generalizing the logic
-	// for all container runtimes in kubelet and remove this funciton.
-	ConvertPodStatusToAPIPodStatus(*api.Pod, *PodStatus) (*api.PodStatus, error)
-	// Return both PodStatus and api.PodStatus, this is just a temporary function.
-	// TODO (random-liu) Remove this method later
-	GetPodStatusAndAPIPodStatus(*api.Pod) (*PodStatus, *api.PodStatus, error)
 	// PullImage pulls an image from the network to local storage using the supplied
 	// secrets if necessary.
 	PullImage(image ImageSpec, pullSecrets []api.Secret) error
@@ -164,6 +133,14 @@ type Pod struct {
 	Containers []*Container
 }
 
+// PodPair contains both runtime#Pod and api#Pod
+type PodPair struct {
+	// APIPod is the api.Pod
+	APIPod *api.Pod
+	// RunningPod is the pod defined defined in pkg/kubelet/container/runtime#Pod
+	RunningPod *Pod
+}
+
 // ContainerID is a type that identifies a container.
 type ContainerID struct {
 	// The type of the container runtime. e.g. 'docker', 'rkt'.
@@ -213,6 +190,16 @@ func (c *ContainerID) UnmarshalJSON(data []byte) error {
 	return c.ParseString(string(data))
 }
 
+// DockerID is an ID of docker container. It is a type to make it clear when we're working with docker container Ids
+type DockerID string
+
+func (id DockerID) ContainerID() ContainerID {
+	return ContainerID{
+		Type: "docker",
+		ID:   string(id),
+	}
+}
+
 type ContainerState string
 
 const (
@@ -231,7 +218,8 @@ type Container struct {
 	// The name of the container, which should be the same as specified by
 	// api.Container.
 	Name string
-	// The image name of the container.
+	// The image name of the container, this also includes the tag of the image,
+	// the expected form is "NAME:TAG".
 	Image string
 	// Hash of the container, used for comparison. Optional for containers
 	// not managed by kubelet.
@@ -274,7 +262,8 @@ type ContainerStatus struct {
 	FinishedAt time.Time
 	// Exit code of the container.
 	ExitCode int
-	// Name of the image.
+	// Name of the image, this also includes the tag of the image,
+	// the expected form is "NAME:TAG".
 	Image string
 	// ID of the image.
 	ImageID string
@@ -316,7 +305,7 @@ type Image struct {
 	// ID of the image.
 	ID string
 	// Other names by which this image is known.
-	Tags []string
+	RepoTags []string
 	// The size of the image in bytes.
 	Size int64
 }
@@ -370,12 +359,16 @@ type RunContainerOptions struct {
 	DNSSearch []string
 	// The parent cgroup to pass to Docker
 	CgroupParent string
+	// The type of container rootfs
+	ReadOnly bool
+	// hostname for pod containers
+	Hostname string
 }
 
 // VolumeInfo contains information about the volume.
 type VolumeInfo struct {
-	// Builder is the volume's builder
-	Builder volume.Builder
+	// Mounter is the volume's mounter
+	Mounter volume.Mounter
 	// SELinuxLabeled indicates whether this volume has had the
 	// pod's SELinux label applied to it or not
 	SELinuxLabeled bool
@@ -429,6 +422,15 @@ func (p *Pod) FindContainerByName(containerName string) *Container {
 	return nil
 }
 
+func (p *Pod) FindContainerByID(id ContainerID) *Container {
+	for _, c := range p.Containers {
+		if c.ID == id {
+			return c
+		}
+	}
+	return nil
+}
+
 // ToAPIPod converts Pod to api.Pod. Note that if a field in api.Pod has no
 // corresponding field in Pod, the field would not be populated.
 func (p *Pod) ToAPIPod() *api.Pod {
@@ -470,4 +472,17 @@ func ParsePodFullName(podFullName string) (string, string, error) {
 		return "", "", fmt.Errorf("failed to parse the pod full name %q", podFullName)
 	}
 	return parts[0], parts[1], nil
+}
+
+// Option is a functional option type for Runtime, useful for
+// completely optional settings.
+type Option func(Runtime)
+
+// Sort the container statuses by creation time.
+type SortContainerStatusesByCreationTime []*ContainerStatus
+
+func (s SortContainerStatusesByCreationTime) Len() int      { return len(s) }
+func (s SortContainerStatusesByCreationTime) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
+func (s SortContainerStatusesByCreationTime) Less(i, j int) bool {
+	return s[i].CreatedAt.Before(s[j].CreatedAt)
 }

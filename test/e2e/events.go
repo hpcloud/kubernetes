@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/fields"
 	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/util"
@@ -32,8 +31,8 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-var _ = Describe("Events", func() {
-	framework := NewFramework("events")
+var _ = KubeDescribe("Events", func() {
+	framework := NewDefaultFramework("events")
 
 	It("should be sent by kubelets and the scheduler about pods scheduling and running [Conformance]", func() {
 
@@ -54,7 +53,7 @@ var _ = Describe("Events", func() {
 				Containers: []api.Container{
 					{
 						Name:  "p",
-						Image: "gcr.io/google_containers/serve_hostname:1.1",
+						Image: "gcr.io/google_containers/serve_hostname:v1.4",
 						Ports: []api.ContainerPort{{ContainerPort: 80}},
 					},
 				},
@@ -74,7 +73,7 @@ var _ = Describe("Events", func() {
 
 		By("verifying the pod is in kubernetes")
 		selector := labels.SelectorFromSet(labels.Set(map[string]string{"time": value}))
-		options := unversioned.ListOptions{LabelSelector: unversioned.LabelSelector{selector}}
+		options := api.ListOptions{LabelSelector: selector}
 		pods, err := podClient.List(options)
 		Expect(len(pods.Items)).To(Equal(1))
 
@@ -92,9 +91,9 @@ var _ = Describe("Events", func() {
 				"involvedObject.kind":      "Pod",
 				"involvedObject.uid":       string(podWithUid.UID),
 				"involvedObject.namespace": framework.Namespace.Name,
-				"source":                   "scheduler",
+				"source":                   api.DefaultSchedulerName,
 			}.AsSelector()
-			options := unversioned.ListOptions{FieldSelector: unversioned.FieldSelector{selector}}
+			options := api.ListOptions{FieldSelector: selector}
 			events, err := framework.Client.Events(framework.Namespace.Name).List(options)
 			if err != nil {
 				return false, err
@@ -114,7 +113,7 @@ var _ = Describe("Events", func() {
 				"involvedObject.namespace": framework.Namespace.Name,
 				"source":                   "kubelet",
 			}.AsSelector()
-			options := unversioned.ListOptions{FieldSelector: unversioned.FieldSelector{selector}}
+			options := api.ListOptions{FieldSelector: selector}
 			events, err = framework.Client.Events(framework.Namespace.Name).List(options)
 			if err != nil {
 				return false, err

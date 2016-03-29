@@ -25,7 +25,7 @@ import (
 	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/registry/generic"
 	"k8s.io/kubernetes/pkg/runtime"
-	utilvalidation "k8s.io/kubernetes/pkg/util/validation"
+	"k8s.io/kubernetes/pkg/util/validation/field"
 )
 
 // svcStrategy implements behavior for Services
@@ -51,14 +51,13 @@ func (svcStrategy) PrepareForCreate(obj runtime.Object) {
 
 // PrepareForUpdate clears fields that are not allowed to be set by end users on update.
 func (svcStrategy) PrepareForUpdate(obj, old runtime.Object) {
-	// TODO: once service has a status sub-resource we can enable this.
-	//newService := obj.(*api.Service)
-	//oldService := old.(*api.Service)
-	//newService.Status = oldService.Status
+	newService := obj.(*api.Service)
+	oldService := old.(*api.Service)
+	newService.Status = oldService.Status
 }
 
 // Validate validates a new service.
-func (svcStrategy) Validate(ctx api.Context, obj runtime.Object) utilvalidation.ErrorList {
+func (svcStrategy) Validate(ctx api.Context, obj runtime.Object) field.ErrorList {
 	service := obj.(*api.Service)
 	return validation.ValidateService(service)
 }
@@ -71,12 +70,34 @@ func (svcStrategy) AllowCreateOnUpdate() bool {
 	return true
 }
 
-func (svcStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) utilvalidation.ErrorList {
+func (svcStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) field.ErrorList {
 	return validation.ValidateServiceUpdate(obj.(*api.Service), old.(*api.Service))
 }
 
 func (svcStrategy) AllowUnconditionalUpdate() bool {
 	return true
+}
+
+func (svcStrategy) Export(obj runtime.Object, exact bool) error {
+	t, ok := obj.(*api.Service)
+	if !ok {
+		// unexpected programmer error
+		return fmt.Errorf("unexpected object: %v", obj)
+	}
+	// TODO: service does not yet have a prepare create strategy (see above)
+	t.Status = api.ServiceStatus{}
+	if exact {
+		return nil
+	}
+	if t.Spec.ClusterIP != api.ClusterIPNone {
+		t.Spec.ClusterIP = "<unknown>"
+	}
+	if t.Spec.Type == api.ServiceTypeNodePort {
+		for i := range t.Spec.Ports {
+			t.Spec.Ports[i].NodePort = 0
+		}
+	}
+	return nil
 }
 
 func MatchServices(label labels.Selector, field fields.Selector) generic.Matcher {
@@ -95,4 +116,24 @@ func MatchServices(label labels.Selector, field fields.Selector) generic.Matcher
 
 func ServiceToSelectableFields(service *api.Service) fields.Set {
 	return generic.ObjectMetaFieldsSet(service.ObjectMeta, true)
+}
+
+type serviceStatusStrategy struct {
+	svcStrategy
+}
+
+// StatusStrategy is the default logic invoked when updating service status.
+var StatusStrategy = serviceStatusStrategy{Strategy}
+
+// PrepareForUpdate clears fields that are not allowed to be set by end users on update of status
+func (serviceStatusStrategy) PrepareForUpdate(obj, old runtime.Object) {
+	newService := obj.(*api.Service)
+	oldService := old.(*api.Service)
+	// status changes are not allowed to update spec
+	newService.Spec = oldService.Spec
+}
+
+// ValidateUpdate is the default update validation for an end user updating status
+func (serviceStatusStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) field.ErrorList {
+	return validation.ValidateServiceStatusUpdate(obj.(*api.Service), old.(*api.Service))
 }

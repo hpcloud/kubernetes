@@ -18,9 +18,10 @@
 If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
+<!-- TAG RELEASE_LINK, added by the munger automatically -->
 <strong>
 The latest release of this document can be found
-[here](http://releases.k8s.io/release-1.1/docs/design/aws_under_the_hood.md).
+[here](http://releases.k8s.io/release-1.2/docs/design/aws_under_the_hood.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -95,7 +96,7 @@ you with sufficient instance storage for your needs.
 
 Note: The master uses a persistent volume ([etcd](architecture.md#etcd)) to track
 its state.  Similar to nodes, containers are mostly run against instance
-storage, except that we repoint some important data onto the peristent volume.
+storage, except that we repoint some important data onto the persistent volume.
 
 The default storage driver for Docker images is aufs.  Specifying btrfs (by passing the environment
 variable `DOCKER_STORAGE=btrfs` to kube-up) is also a good choice for a filesystem.  btrfs
@@ -175,8 +176,12 @@ The nodes do not need a lot of access to the AWS APIs.  They need to download
 a distribution file, and then are responsible for attaching and detaching EBS
 volumes from itself.
 
-The node policy is relatively minimal.  The master policy is probably overly
-permissive.  The security concious may want to lock-down the IAM policies
+The node policy is relatively minimal.  In 1.2 and later, nodes can retrieve ECR
+authorization tokens, refresh them every 12 hours if needed, and fetch Docker
+images from it, as long as the appropriate permissions are enabled.  Those in
+[AmazonEC2ContainerRegistryReadOnly](http://docs.aws.amazon.com/AmazonECR/latest/userguide/ecr_managed_policies.html#AmazonEC2ContainerRegistryReadOnly),
+without write access, should suffice.  The master policy is probably overly
+permissive.  The security conscious may want to lock-down the IAM policies
 further ([#11936](http://issues.k8s.io/11936)).
 
 We should make it easier to extend IAM permissions and also ensure that they
@@ -184,7 +189,7 @@ are correctly configured ([#14226](http://issues.k8s.io/14226)).
 
 ### Tagging
 
-All AWS resources are tagged with a tag named "KuberentesCluster", with a value
+All AWS resources are tagged with a tag named "KubernetesCluster", with a value
 that is the unique cluster-id.  This tag is used to identify a particular
 'instance' of Kubernetes, even if two clusters are deployed into the same VPC.
 Resources are considered to belong to the same cluster if and only if they have
@@ -275,7 +280,7 @@ Salt, for example).  These objects can currently be manually created:
 
 * Set the `AWS_S3_BUCKET` environment variable to use an existing S3 bucket.
 * Set the `VPC_ID` environment variable to reuse an existing VPC.
-* Set the `SUBNET_ID` environemnt variable to reuse an existing subnet.
+* Set the `SUBNET_ID` environment variable to reuse an existing subnet.
 * If your route table has a matching `KubernetesCluster` tag, it will
   be reused.
 * If your security groups are appropriately named, they will be reused.

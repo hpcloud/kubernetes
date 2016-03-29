@@ -20,15 +20,14 @@ import (
 	"time"
 
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/labels"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 )
 
-var _ = Describe("Kibana Logging Instances Is Alive", func() {
-	f := NewFramework("kibana-logging")
+var _ = KubeDescribe("Kibana Logging Instances Is Alive", func() {
+	f := NewDefaultFramework("kibana-logging")
 
 	BeforeEach(func() {
 		// TODO: For now assume we are only testing cluster logging with Elasticsearch
@@ -69,7 +68,7 @@ func ClusterLevelLoggingWithKibana(f *Framework) {
 	// Wait for the Kibana pod(s) to enter the running state.
 	By("Checking to make sure the Kibana pods are running")
 	label := labels.SelectorFromSet(labels.Set(map[string]string{kibanaKey: kibanaValue}))
-	options := unversioned.ListOptions{LabelSelector: unversioned.LabelSelector{label}}
+	options := api.ListOptions{LabelSelector: label}
 	pods, err := f.Client.Pods(api.NamespaceSystem).List(options)
 	Expect(err).NotTo(HaveOccurred())
 	for _, pod := range pods.Items {
@@ -80,11 +79,13 @@ func ClusterLevelLoggingWithKibana(f *Framework) {
 	By("Checking to make sure we get a response from the Kibana UI.")
 	err = nil
 	for start := time.Now(); time.Since(start) < graceTime; time.Sleep(5 * time.Second) {
+		proxyRequest, errProxy := getServicesProxyRequest(f.Client, f.Client.Get())
+		if errProxy != nil {
+			Logf("After %v failed to get services proxy request: %v", time.Since(start), errProxy)
+			continue
+		}
 		// Query against the root URL for Kibana.
-		_, err = f.Client.Get().
-			Namespace(api.NamespaceSystem).
-			Prefix("proxy").
-			Resource("services").
+		_, err = proxyRequest.Namespace(api.NamespaceSystem).
 			Name("kibana-logging").
 			DoRaw()
 		if err != nil {

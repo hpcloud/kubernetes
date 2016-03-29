@@ -15,6 +15,14 @@ limitations under the License.
 */
 
 // Package unversioned contains API types that are common to all versions.
+//
+// The package contains two categories of types:
+// - external (serialized) types that lack their own version (e.g TypeMeta)
+// - internal (never-serialized) types that are needed by several different
+//   api groups, and so live here, to avoid duplication and/or import loops
+//   (e.g. LabelSelector).
+// In the future, we will probably move these categories of objects into
+// separate packages.
 package unversioned
 
 import "strings"
@@ -54,25 +62,13 @@ type ListMeta struct {
 	ResourceVersion string `json:"resourceVersion,omitempty"`
 }
 
-// ListOptions is the query options to a standard REST list/watch calls.
-type ListOptions struct {
+// ExportOptions is the query options to the standard REST get call.
+type ExportOptions struct {
 	TypeMeta `json:",inline"`
-
-	// A selector to restrict the list of returned objects by their labels.
-	// Defaults to everything.
-	LabelSelector LabelSelector `json:"labelSelector,omitempty"`
-	// A selector to restrict the list of returned objects by their fields.
-	// Defaults to everything.
-	FieldSelector FieldSelector `json:"fieldSelector,omitempty"`
-
-	// Watch for changes to the described resources and return them as a stream of
-	// add, update, and remove notifications. Specify resourceVersion.
-	Watch bool `json:"watch,omitempty"`
-	// When specified with a watch call, shows changes that occur after that particular version of a resource.
-	// Defaults to changes from the beginning of history.
-	ResourceVersion string `json:"resourceVersion,omitempty"`
-	// Timeout for the list/watch call.
-	TimeoutSeconds *int64 `json:"timeoutSeconds,omitempty"`
+	// Should this value be exported.  Export strips fields that a user can not specify.`
+	Export bool `json:"export"`
+	// Should the export be exact.  Exact export maintains cluster-specific fields like 'Namespace'
+	Exact bool `json:"exact"`
 }
 
 // Status is a return value for calls that don't return other objects.
@@ -112,6 +108,8 @@ type StatusDetails struct {
 	// The name attribute of the resource associated with the status StatusReason
 	// (when there is a single name which can be described).
 	Name string `json:"name,omitempty"`
+	// The group attribute of the resource associated with the status StatusReason.
+	Group string `json:"group,omitempty"`
 	// The kind attribute of the resource associated with the status StatusReason.
 	// On some operations may differ from the requested resource Kind.
 	// More info: http://releases.k8s.io/HEAD/docs/devel/api-conventions.md#types-kinds
@@ -176,10 +174,10 @@ const (
 	// Status code 409
 	StatusReasonAlreadyExists StatusReason = "AlreadyExists"
 
-	// StatusReasonConflict means the requested update operation cannot be completed
-	// due to a conflict in the operation. The client may need to alter the request.
-	// Each resource may define custom details that indicate the nature of the
-	// conflict.
+	// StatusReasonConflict means the requested operation cannot be completed
+	// due to a conflict in the operation. The client may need to alter the
+	// request. Each resource may define custom details that indicate the
+	// nature of the conflict.
 	// Status code 409
 	StatusReasonConflict StatusReason = "Conflict"
 
@@ -239,13 +237,13 @@ const (
 	// Details (optional):
 	//   "causes" - The original error
 	// Status code 500
-	StatusReasonInternalError = "InternalError"
+	StatusReasonInternalError StatusReason = "InternalError"
 
 	// StatusReasonExpired indicates that the request is invalid because the content you are requesting
 	// has expired and is no longer available. It is typically associated with watches that can't be
 	// serviced.
 	// Status code 410 (gone)
-	StatusReasonExpired = "Expired"
+	StatusReasonExpired StatusReason = "Expired"
 
 	// StatusReasonServiceUnavailable means that the request itself was valid,
 	// but the requested service is unavailable at this time.
@@ -302,13 +300,6 @@ const (
 	CauseTypeUnexpectedServerResponse CauseType = "UnexpectedServerResponse"
 )
 
-func (*ListOptions) IsAnAPIObject()     {}
-func (*Status) IsAnAPIObject()          {}
-func (*APIVersions) IsAnAPIObject()     {}
-func (*APIGroupList) IsAnAPIObject()    {}
-func (*APIGroup) IsAnAPIObject()        {}
-func (*APIResourceList) IsAnAPIObject() {}
-
 // APIVersions lists the versions that are available, to allow clients to
 // discover the API at /api, which is the root path of the legacy v1 API.
 //
@@ -317,6 +308,14 @@ type APIVersions struct {
 	TypeMeta `json:",inline"`
 	// versions are the api versions that are available.
 	Versions []string `json:"versions"`
+	// a map of client CIDR to server address that is serving this group.
+	// This is to help clients reach servers in the most network-efficient way possible.
+	// Clients can use the appropriate server address as per the CIDR that they match.
+	// In case of multiple matches, clients should use the longest matching CIDR.
+	// The server returns only those CIDRs that it thinks that the client can match.
+	// For example: the master will return an internal IP CIDR only, if the client reaches the server using an internal IP.
+	// Server looks at X-Forwarded-For header or X-Real-Ip header or request.RemoteAddr (in that order) to get the client IP.
+	ServerAddressByClientCIDRs []ServerAddressByClientCIDR `json:"serverAddressByClientCIDRs"`
 }
 
 // APIGroupList is a list of APIGroup, to allow clients to discover the API at
@@ -338,6 +337,23 @@ type APIGroup struct {
 	// preferredVersion is the version preferred by the API server, which
 	// probably is the storage version.
 	PreferredVersion GroupVersionForDiscovery `json:"preferredVersion,omitempty"`
+	// a map of client CIDR to server address that is serving this group.
+	// This is to help clients reach servers in the most network-efficient way possible.
+	// Clients can use the appropriate server address as per the CIDR that they match.
+	// In case of multiple matches, clients should use the longest matching CIDR.
+	// The server returns only those CIDRs that it thinks that the client can match.
+	// For example: the master will return an internal IP CIDR only, if the client reaches the server using an internal IP.
+	// Server looks at X-Forwarded-For header or X-Real-Ip header or request.RemoteAddr (in that order) to get the client IP.
+	ServerAddressByClientCIDRs []ServerAddressByClientCIDR `json:"serverAddressByClientCIDRs"`
+}
+
+// ServerAddressByClientCIDR helps the client to determine the server address that they should use, depending on the clientCIDR that they match.
+type ServerAddressByClientCIDR struct {
+	// The CIDR with which clients can match their IP to figure out the server address that they should use.
+	ClientCIDR string `json:"clientCIDR"`
+	// Address of this server, suitable for a client that matches the above CIDR.
+	// This can be a hostname, hostname:port, IP or IP:port.
+	ServerAddress string `json:"serverAddress"`
 }
 
 // GroupVersion contains the "group/version" and "version" string of a version.
@@ -356,6 +372,8 @@ type APIResource struct {
 	Name string `json:"name"`
 	// namespaced indicates if a resource is namespaced or not.
 	Namespaced bool `json:"namespaced"`
+	// kind is the kind for the resource (e.g. 'Foo' is the kind for a resource 'foo')
+	Kind string `json:"kind"`
 }
 
 // APIResourceList is a list of APIResource, it is used to expose the name of the
@@ -397,3 +415,46 @@ func (apiVersions APIVersions) GoString() string {
 
 // Patch is provided to give a concrete name and type to the Kubernetes PATCH request body.
 type Patch struct{}
+
+// Note:
+// There are two different styles of label selectors used in versioned types:
+// an older style which is represented as just a string in versioned types, and a
+// newer style that is structured.  LabelSelector is an internal representation for the
+// latter style.
+
+// A label selector is a label query over a set of resources. The result of matchLabels and
+// matchExpressions are ANDed. An empty label selector matches all objects. A null
+// label selector matches no objects.
+type LabelSelector struct {
+	// matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+	// map is equivalent to an element of matchExpressions, whose key field is "key", the
+	// operator is "In", and the values array contains only "value". The requirements are ANDed.
+	MatchLabels map[string]string `json:"matchLabels,omitempty"`
+	// matchExpressions is a list of label selector requirements. The requirements are ANDed.
+	MatchExpressions []LabelSelectorRequirement `json:"matchExpressions,omitempty"`
+}
+
+// A label selector requirement is a selector that contains values, a key, and an operator that
+// relates the key and values.
+type LabelSelectorRequirement struct {
+	// key is the label key that the selector applies to.
+	Key string `json:"key" patchStrategy:"merge" patchMergeKey:"key"`
+	// operator represents a key's relationship to a set of values.
+	// Valid operators ard In, NotIn, Exists and DoesNotExist.
+	Operator LabelSelectorOperator `json:"operator"`
+	// values is an array of string values. If the operator is In or NotIn,
+	// the values array must be non-empty. If the operator is Exists or DoesNotExist,
+	// the values array must be empty. This array is replaced during a strategic
+	// merge patch.
+	Values []string `json:"values,omitempty"`
+}
+
+// A label selector operator is the set of operators that can be used in a selector requirement.
+type LabelSelectorOperator string
+
+const (
+	LabelSelectorOpIn           LabelSelectorOperator = "In"
+	LabelSelectorOpNotIn        LabelSelectorOperator = "NotIn"
+	LabelSelectorOpExists       LabelSelectorOperator = "Exists"
+	LabelSelectorOpDoesNotExist LabelSelectorOperator = "DoesNotExist"
+)

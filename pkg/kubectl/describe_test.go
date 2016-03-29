@@ -28,6 +28,7 @@ import (
 	"k8s.io/kubernetes/pkg/api/resource"
 	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/apis/extensions"
+	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/fake"
 	client "k8s.io/kubernetes/pkg/client/unversioned"
 	"k8s.io/kubernetes/pkg/client/unversioned/testclient"
 )
@@ -267,7 +268,7 @@ func TestDescribeContainers(t *testing.T) {
 				ContainerStatuses: []api.ContainerStatus{testCase.status},
 			},
 		}
-		describeContainers(&pod, out)
+		DescribeContainers(pod.Spec.Containers, pod.Status.ContainerStatuses, EnvValueRetriever(&pod), out)
 		output := out.String()
 		for _, expected := range testCase.expectedElements {
 			if !strings.Contains(output, expected) {
@@ -359,53 +360,55 @@ func TestDefaultDescribers(t *testing.T) {
 
 func TestGetPodsTotalRequests(t *testing.T) {
 	testCases := []struct {
-		pods                         []*api.Pod
+		pods                         *api.PodList
 		expectedReqs, expectedLimits map[api.ResourceName]resource.Quantity
 	}{
 		{
-			pods: []*api.Pod{
-				{
-					Spec: api.PodSpec{
-						Containers: []api.Container{
-							{
-								Resources: api.ResourceRequirements{
-									Requests: api.ResourceList{
-										api.ResourceName(api.ResourceCPU):     resource.MustParse("1"),
-										api.ResourceName(api.ResourceMemory):  resource.MustParse("300Mi"),
-										api.ResourceName(api.ResourceStorage): resource.MustParse("1G"),
+			pods: &api.PodList{
+				Items: []api.Pod{
+					{
+						Spec: api.PodSpec{
+							Containers: []api.Container{
+								{
+									Resources: api.ResourceRequirements{
+										Requests: api.ResourceList{
+											api.ResourceName(api.ResourceCPU):     resource.MustParse("1"),
+											api.ResourceName(api.ResourceMemory):  resource.MustParse("300Mi"),
+											api.ResourceName(api.ResourceStorage): resource.MustParse("1G"),
+										},
 									},
 								},
-							},
-							{
-								Resources: api.ResourceRequirements{
-									Requests: api.ResourceList{
-										api.ResourceName(api.ResourceCPU):     resource.MustParse("90m"),
-										api.ResourceName(api.ResourceMemory):  resource.MustParse("120Mi"),
-										api.ResourceName(api.ResourceStorage): resource.MustParse("200M"),
+								{
+									Resources: api.ResourceRequirements{
+										Requests: api.ResourceList{
+											api.ResourceName(api.ResourceCPU):     resource.MustParse("90m"),
+											api.ResourceName(api.ResourceMemory):  resource.MustParse("120Mi"),
+											api.ResourceName(api.ResourceStorage): resource.MustParse("200M"),
+										},
 									},
 								},
 							},
 						},
 					},
-				},
-				{
-					Spec: api.PodSpec{
-						Containers: []api.Container{
-							{
-								Resources: api.ResourceRequirements{
-									Requests: api.ResourceList{
-										api.ResourceName(api.ResourceCPU):     resource.MustParse("60m"),
-										api.ResourceName(api.ResourceMemory):  resource.MustParse("43Mi"),
-										api.ResourceName(api.ResourceStorage): resource.MustParse("500M"),
+					{
+						Spec: api.PodSpec{
+							Containers: []api.Container{
+								{
+									Resources: api.ResourceRequirements{
+										Requests: api.ResourceList{
+											api.ResourceName(api.ResourceCPU):     resource.MustParse("60m"),
+											api.ResourceName(api.ResourceMemory):  resource.MustParse("43Mi"),
+											api.ResourceName(api.ResourceStorage): resource.MustParse("500M"),
+										},
 									},
 								},
-							},
-							{
-								Resources: api.ResourceRequirements{
-									Requests: api.ResourceList{
-										api.ResourceName(api.ResourceCPU):     resource.MustParse("34m"),
-										api.ResourceName(api.ResourceMemory):  resource.MustParse("83Mi"),
-										api.ResourceName(api.ResourceStorage): resource.MustParse("700M"),
+								{
+									Resources: api.ResourceRequirements{
+										Requests: api.ResourceList{
+											api.ResourceName(api.ResourceCPU):     resource.MustParse("34m"),
+											api.ResourceName(api.ResourceMemory):  resource.MustParse("83Mi"),
+											api.ResourceName(api.ResourceStorage): resource.MustParse("700M"),
+										},
 									},
 								},
 							},
@@ -500,7 +503,7 @@ func TestPersistentVolumeDescriber(t *testing.T) {
 }
 
 func TestDescribeDeployment(t *testing.T) {
-	fake := testclient.NewSimpleFake(&extensions.Deployment{
+	fake := fake.NewSimpleClientset(&extensions.Deployment{
 		ObjectMeta: api.ObjectMeta{
 			Name:      "bar",
 			Namespace: "foo",
@@ -509,8 +512,7 @@ func TestDescribeDeployment(t *testing.T) {
 			Template: api.PodTemplateSpec{},
 		},
 	})
-	c := &describeClient{T: t, Namespace: "foo", Interface: fake}
-	d := DeploymentDescriber{c}
+	d := DeploymentDescriber{fake}
 	out, err := d.Describe("foo", "bar")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)

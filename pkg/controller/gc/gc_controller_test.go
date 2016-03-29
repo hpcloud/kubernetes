@@ -23,7 +23,7 @@ import (
 
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/unversioned"
-	"k8s.io/kubernetes/pkg/client/unversioned/testclient"
+	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/fake"
 	"k8s.io/kubernetes/pkg/controller"
 	"k8s.io/kubernetes/pkg/util/sets"
 )
@@ -66,7 +66,7 @@ func TestGC(t *testing.T) {
 	}
 
 	for i, test := range testCases {
-		client := testclient.NewSimpleFake()
+		client := fake.NewSimpleClientset()
 		gcc := New(client, controller.NoResyncPeriodFunc, test.threshold)
 		deletedPodNames := make([]string, 0)
 		var lock sync.Mutex
@@ -81,7 +81,7 @@ func TestGC(t *testing.T) {
 		for _, pod := range test.pods {
 			creationTime = creationTime.Add(1 * time.Hour)
 			gcc.podStore.Store.Add(&api.Pod{
-				ObjectMeta: api.ObjectMeta{Name: pod.name, CreationTimestamp: unversioned.Time{creationTime}},
+				ObjectMeta: api.ObjectMeta{Name: pod.name, CreationTimestamp: unversioned.Time{Time: creationTime}},
 				Status:     api.PodStatus{Phase: pod.phase},
 			})
 		}
@@ -101,8 +101,4 @@ func TestGC(t *testing.T) {
 			t.Errorf("[%v]pod's deleted expected and actual did not match.\n\texpected: %v\n\tactual: %v", i, test.deletedPodNames, deletedPodNames)
 		}
 	}
-}
-
-func TestTerminatedPodSelectorCompiles(t *testing.T) {
-	compileTerminatedPodSelector()
 }

@@ -18,9 +18,10 @@
 If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
+<!-- TAG RELEASE_LINK, added by the munger automatically -->
 <strong>
 The latest release of this document can be found
-[here](http://releases.k8s.io/release-1.1/docs/design/persistent-storage.md).
+[here](http://releases.k8s.io/release-1.2/docs/design/persistent-storage.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -35,7 +36,7 @@ Documentation for other releases can be found at
 
 This document proposes a model for managing persistent, cluster-scoped storage for applications requiring long lived data.
 
-### tl;dr
+### Abstract
 
 Two new API kinds:
 

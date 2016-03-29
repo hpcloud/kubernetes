@@ -25,7 +25,7 @@ package runtime
 //      runtime.TypeMeta    `json:",inline"`
 //      ... // other fields
 // }
-// func (*MyAwesomeAPIObject) IsAnAPIObject() {}
+// func (obj *MyAwesomeAPIObject) SetGroupVersionKind(gvk *unversioned.GroupVersionKind) { unversioned.UpdateTypeMeta(obj,gvk) }; GroupVersionKind() *GroupVersionKind
 //
 // TypeMeta is provided here for convenience. You may use it directly from this package or define
 // your own with the same fields.
@@ -36,39 +36,24 @@ type TypeMeta struct {
 	Kind       string `json:"kind,omitempty" yaml:"kind,omitempty"`
 }
 
-// PluginBase is like TypeMeta, but it's intended for plugin objects that won't ever be encoded
-// except while embedded in other objects.
-type PluginBase struct {
-	Kind string `json:"kind,omitempty"`
-}
+const (
+	ContentTypeJSON string = "application/json"
+	// TODO: Fix the value.
+	ContentTypeProtobuf string = "application/protobuf"
+)
 
-// EmbeddedObject has appropriate encoder and decoder functions, such that on the wire, it's
-// stored as a []byte, but in memory, the contained object is accessible as an Object
-// via the Get() function. Only valid API objects may be stored via EmbeddedObject.
-// The purpose of this is to allow an API object of type known only at runtime to be
-// embedded within other API objects.
-//
-// Note that object assumes that you've registered all of your api types with the api package.
-//
-// EmbeddedObject and RawExtension can be used together to allow for API object extensions:
-// see the comment for RawExtension.
-type EmbeddedObject struct {
-	Object
-}
-
-// RawExtension is used with EmbeddedObject to do a two-phase encoding of extension objects.
+// RawExtension is used to hold extensions in external versions.
 //
 // To use this, make a field which has RawExtension as its type in your external, versioned
-// struct, and EmbeddedObject in your internal struct. You also need to register your
+// struct, and Object in your internal struct. You also need to register your
 // various plugin types.
 //
 // // Internal package:
 // type MyAPIObject struct {
 // 	runtime.TypeMeta `json:",inline"`
-//	MyPlugin runtime.EmbeddedObject `json:"myPlugin"`
+//	MyPlugin runtime.Object `json:"myPlugin"`
 // }
 // type PluginA struct {
-// 	runtime.PluginBase `json:",inline"`
 //	AOption string `json:"aOption"`
 // }
 //
@@ -78,7 +63,6 @@ type EmbeddedObject struct {
 //	MyPlugin runtime.RawExtension `json:"myPlugin"`
 // }
 // type PluginA struct {
-// 	runtime.PluginBase `json:",inline"`
 //	AOption string `json:"aOption"`
 // }
 //
@@ -97,12 +81,18 @@ type EmbeddedObject struct {
 // The next step is to copy (using pkg/conversion) into the internal struct. The runtime
 // package's DefaultScheme has conversion functions installed which will unpack the
 // JSON stored in RawExtension, turning it into the correct object type, and storing it
-// in the EmbeddedObject. (TODO: In the case where the object is of an unknown type, a
+// in the Object. (TODO: In the case where the object is of an unknown type, a
 // runtime.Unknown object will be created and stored.)
 //
 // +protobuf=true
 type RawExtension struct {
-	RawJSON []byte
+	// Raw is the underlying serialization of this object.
+	//
+	// TODO: Determine how to detect ContentType and ContentEncoding of 'Raw' data.
+	Raw []byte
+	// Object can hold a representation of this extension - useful for working with versioned
+	// structs.
+	Object Object `json:"-"`
 }
 
 // Unknown allows api objects with unknown types to be passed-through. This can be used
@@ -114,13 +104,17 @@ type RawExtension struct {
 // +protobuf=true
 type Unknown struct {
 	TypeMeta `json:",inline"`
-	// RawJSON will hold the complete JSON of the object which couldn't be matched
+	// Raw will hold the complete serialized object which couldn't be matched
 	// with a registered type. Most likely, nothing should be done with this
 	// except for passing it through the system.
-	RawJSON []byte
+	Raw []byte
+	// ContentEncoding is encoding used to encode 'Raw' data.
+	// Unspecified means no encoding.
+	ContentEncoding string
+	// ContentType  is serialization method used to serialize 'Raw'.
+	// Unspecified means ContentTypeJSON.
+	ContentType string
 }
-
-func (*Unknown) IsAnAPIObject() {}
 
 // Unstructured allows objects that do not have Golang structs registered to be manipulated
 // generically. This can be used to deal with the API objects from a plug-in. Unstructured
@@ -129,9 +123,31 @@ func (*Unknown) IsAnAPIObject() {}
 // metadata and field mutatation.
 type Unstructured struct {
 	TypeMeta `json:",inline"`
+
+	// Name is populated from metadata (if present) upon deserialization
+	Name string
+
 	// Object is a JSON compatible map with string, float, int, []interface{}, or map[string]interface{}
 	// children.
 	Object map[string]interface{}
 }
 
-func (*Unstructured) IsAnAPIObject() {}
+// UnstructuredList allows lists that do not have Golang structs
+// registered to be manipulated generically. This can be used to deal
+// with the API lists from a plug-in.
+type UnstructuredList struct {
+	TypeMeta `json:",inline"`
+
+	// Items is a list of unstructured objects.
+	Items []*Unstructured `json:"items"`
+}
+
+// VersionedObjects is used by Decoders to give callers a way to access all versions
+// of an object during the decoding process.
+type VersionedObjects struct {
+	// Objects is the set of objects retrieved during decoding, in order of conversion.
+	// The 0 index is the object as serialized on the wire. If conversion has occurred,
+	// other objects may be present. The right most object is the same as would be returned
+	// by a normal Decode call.
+	Objects []Object
+}

@@ -23,6 +23,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/golang/glog"
 	"github.com/spf13/cobra"
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/kubectl"
@@ -45,6 +46,9 @@ type AnnotateOptions struct {
 	all             bool
 	resourceVersion string
 
+	changeCause       string
+	recordChangeCause bool
+
 	f   *cmdutil.Factory
 	out io.Writer
 	cmd *cobra.Command
@@ -64,23 +68,23 @@ limitranges (limits), persistentvolumes (pv), persistentvolumeclaims (pvc),
 horizontalpodautoscalers (hpa), resourcequotas (quota) or secrets.`
 	annotate_example = `# Update pod 'foo' with the annotation 'description' and the value 'my frontend'.
 # If the same annotation is set multiple times, only the last value will be applied
-$ kubectl annotate pods foo description='my frontend'
+kubectl annotate pods foo description='my frontend'
 
 # Update a pod identified by type and name in "pod.json"
-$ kubectl annotate -f pod.json description='my frontend'
+kubectl annotate -f pod.json description='my frontend'
 
 # Update pod 'foo' with the annotation 'description' and the value 'my frontend running nginx', overwriting any existing value.
-$ kubectl annotate --overwrite pods foo description='my frontend running nginx'
+kubectl annotate --overwrite pods foo description='my frontend running nginx'
 
 # Update all pods in the namespace
-$ kubectl annotate pods --all description='my frontend running nginx'
+kubectl annotate pods --all description='my frontend running nginx'
 
 # Update pod 'foo' only if the resource is unchanged from version 1.
-$ kubectl annotate pods foo description='my frontend running nginx' --resource-version=1
+kubectl annotate pods foo description='my frontend running nginx' --resource-version=1
 
 # Update pod 'foo' by removing an annotation named 'description' if it exists.
 # Does not require the --overwrite flag.
-$ kubectl annotate pods foo description-`
+kubectl annotate pods foo description-`
 )
 
 func NewCmdAnnotate(f *cmdutil.Factory, out io.Writer) *cobra.Command {
@@ -110,6 +114,7 @@ func NewCmdAnnotate(f *cmdutil.Factory, out io.Writer) *cobra.Command {
 	cmd.Flags().StringVar(&options.resourceVersion, "resource-version", "", "If non-empty, the annotation update will only succeed if this is the current resource-version for the object. Only valid when specifying a single resource.")
 	usage := "Filename, directory, or URL to a file identifying the resource to update the annotation"
 	kubectl.AddJsonFilenameFlag(cmd, &options.filenames, usage)
+	cmdutil.AddRecordFlag(cmd)
 	return cmd
 }
 
@@ -150,8 +155,11 @@ func (o *AnnotateOptions) Complete(f *cmdutil.Factory, out io.Writer, cmd *cobra
 		return err
 	}
 
+	o.recordChangeCause = cmdutil.GetRecordFlag(cmd)
+	o.changeCause = f.Command()
+
 	mapper, typer := f.Object()
-	o.builder = resource.NewBuilder(mapper, typer, f.ClientMapperForCommand()).
+	o.builder = resource.NewBuilder(mapper, typer, resource.ClientMapperFunc(f.ClientForMapping), f.Decoder(true)).
 		ContinueOnError().
 		NamespaceParam(namespace).DefaultNamespace().
 		FilenameParam(enforceNamespace, o.filenames...).
@@ -193,10 +201,18 @@ func (o AnnotateOptions) RunAnnotate() error {
 			return err
 		}
 
-		name, namespace, obj := info.Name, info.Namespace, info.Object
+		obj, err := info.Mapping.ConvertToVersion(info.Object, info.Mapping.GroupVersionKind.GroupVersion().String())
+		if err != nil {
+			return err
+		}
+		name, namespace := info.Name, info.Namespace
 		oldData, err := json.Marshal(obj)
 		if err != nil {
 			return err
+		}
+		// If we should record change-cause, add it to new annotations
+		if cmdutil.ContainsChangeCause(info) || o.recordChangeCause {
+			o.newAnnotations[kubectl.ChangeCauseAnnotation] = o.changeCause
 		}
 		if err := o.updateAnnotations(obj); err != nil {
 			return err
@@ -206,18 +222,24 @@ func (o AnnotateOptions) RunAnnotate() error {
 			return err
 		}
 		patchBytes, err := strategicpatch.CreateTwoWayMergePatch(oldData, newData, obj)
+		createdPatch := err == nil
 		if err != nil {
-			return err
+			glog.V(2).Infof("couldn't compute patch: %v", err)
 		}
 
 		mapping := info.ResourceMapping()
-		client, err := o.f.RESTClient(mapping)
+		client, err := o.f.ClientForMapping(mapping)
 		if err != nil {
 			return err
 		}
 		helper := resource.NewHelper(client, mapping)
 
-		outputObj, err := helper.Patch(namespace, name, api.StrategicMergePatchType, patchBytes)
+		var outputObj runtime.Object
+		if createdPatch {
+			outputObj, err = helper.Patch(namespace, name, api.StrategicMergePatchType, patchBytes)
+		} else {
+			outputObj, err = helper.Replace(namespace, name, false, obj)
+		}
 		if err != nil {
 			return err
 		}
@@ -285,6 +307,10 @@ func validateAnnotations(removeAnnotations []string, newAnnotations map[string]s
 func validateNoAnnotationOverwrites(meta *api.ObjectMeta, annotations map[string]string) error {
 	var buf bytes.Buffer
 	for key := range annotations {
+		// change-cause annotation can always be overwritten
+		if key == kubectl.ChangeCauseAnnotation {
+			continue
+		}
 		if value, found := meta.Annotations[key]; found {
 			if buf.Len() > 0 {
 				buf.WriteString("; ")

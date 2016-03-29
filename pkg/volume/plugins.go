@@ -23,7 +23,8 @@ import (
 
 	"github.com/golang/glog"
 	"k8s.io/kubernetes/pkg/api"
-	client "k8s.io/kubernetes/pkg/client/unversioned"
+	"k8s.io/kubernetes/pkg/api/resource"
+	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 	"k8s.io/kubernetes/pkg/cloudprovider"
 	"k8s.io/kubernetes/pkg/types"
 	utilerrors "k8s.io/kubernetes/pkg/util/errors"
@@ -39,15 +40,21 @@ type VolumeOptions struct {
 	// it will be replaced and expanded on by future SecurityContext work.
 	RootContext string
 
-	// The attributes below are required by volume.Creater
-	// perhaps CreaterVolumeOptions struct?
+	// The attributes below are required by volume.Provisioner
+	// TODO: refactor all of this out of volumes when an admin can configure many kinds of provisioners.
 
-	// CapacityMB is the size in MB of a volume.
-	CapacityMB int
+	// Capacity is the size of a volume.
+	Capacity resource.Quantity
 	// AccessModes of a volume
 	AccessModes []api.PersistentVolumeAccessMode
 	// Reclamation policy for a persistent volume
 	PersistentVolumeReclaimPolicy api.PersistentVolumeReclaimPolicy
+	// PV.Name of the appropriate PersistentVolume. Used to generate cloud volume name.
+	PVName string
+	// Unique name of Kubernetes cluster.
+	ClusterName string
+	// Tags to attach to the real volume in the cloud provider - e.g. AWS EBS
+	CloudTags *map[string]string
 }
 
 // VolumePlugin is an interface to volume plugins that can be used on a
@@ -56,7 +63,7 @@ type VolumePlugin interface {
 	// Init initializes the plugin.  This will be called exactly once
 	// before any New* calls are made - implementations of plugins may
 	// depend on this.
-	Init(host VolumeHost)
+	Init(host VolumeHost) error
 
 	// Name returns the plugin's name.  Plugins should use namespaced names
 	// such as "example.com/volume".  The "kubernetes.io" namespace is
@@ -68,16 +75,16 @@ type VolumePlugin interface {
 	// const.
 	CanSupport(spec *Spec) bool
 
-	// NewBuilder creates a new volume.Builder from an API specification.
+	// NewMounter creates a new volume.Mounter from an API specification.
 	// Ownership of the spec pointer in *not* transferred.
 	// - spec: The api.Volume spec
 	// - pod: The enclosing pod
-	NewBuilder(spec *Spec, podRef *api.Pod, opts VolumeOptions) (Builder, error)
+	NewMounter(spec *Spec, podRef *api.Pod, opts VolumeOptions) (Mounter, error)
 
-	// NewCleaner creates a new volume.Cleaner from recoverable state.
+	// NewUnmounter creates a new volume.Unmounter from recoverable state.
 	// - name: The volume name, as per the api.Volume spec.
 	// - podUID: The UID of the enclosing pod
-	NewCleaner(name string, podUID types.UID) (Cleaner, error)
+	NewUnmounter(name string, podUID types.UID) (Unmounter, error)
 }
 
 // PersistentVolumePlugin is an extended interface of VolumePlugin and is used
@@ -106,12 +113,26 @@ type DeletableVolumePlugin interface {
 	NewDeleter(spec *Spec) (Deleter, error)
 }
 
-// CreatableVolumePlugin is an extended interface of VolumePlugin and is used to create volumes for the cluster.
-type CreatableVolumePlugin interface {
+const (
+	// Name of a volume in external cloud that is being provisioned and thus
+	// should be ignored by rest of Kubernetes.
+	ProvisionedVolumeName = "placeholder-for-provisioning"
+)
+
+// ProvisionableVolumePlugin is an extended interface of VolumePlugin and is used to create volumes for the cluster.
+type ProvisionableVolumePlugin interface {
 	VolumePlugin
-	// NewCreater creates a new volume.Creater which knows how to create PersistentVolumes in accordance with
+	// NewProvisioner creates a new volume.Provisioner which knows how to create PersistentVolumes in accordance with
 	// the plugin's underlying storage provider
-	NewCreater(options VolumeOptions) (Creater, error)
+	NewProvisioner(options VolumeOptions) (Provisioner, error)
+}
+
+// AttachableVolumePlugin is an extended interface of VolumePlugin and is used for volumes that require attachment
+// to a node before mounting.
+type AttachableVolumePlugin interface {
+	VolumePlugin
+	NewAttacher(spec *Spec) (Attacher, error)
+	NewDetacher(name string, podUID types.UID) (Detacher, error)
 }
 
 // VolumeHost is an interface that plugins can use to access the kubelet.
@@ -135,18 +156,18 @@ type VolumeHost interface {
 	GetPodPluginDir(podUID types.UID, pluginName string) string
 
 	// GetKubeClient returns a client interface
-	GetKubeClient() client.Interface
+	GetKubeClient() clientset.Interface
 
-	// NewWrapperBuilder finds an appropriate plugin with which to handle
+	// NewWrapperMounter finds an appropriate plugin with which to handle
 	// the provided spec.  This is used to implement volume plugins which
 	// "wrap" other plugins.  For example, the "secret" volume is
 	// implemented in terms of the "emptyDir" volume.
-	NewWrapperBuilder(spec *Spec, pod *api.Pod, opts VolumeOptions) (Builder, error)
+	NewWrapperMounter(volName string, spec Spec, pod *api.Pod, opts VolumeOptions) (Mounter, error)
 
-	// NewWrapperCleaner finds an appropriate plugin with which to handle
-	// the provided spec.  See comments on NewWrapperBuilder for more
+	// NewWrapperUnmounter finds an appropriate plugin with which to handle
+	// the provided spec.  See comments on NewWrapperMounter for more
 	// context.
-	NewWrapperCleaner(spec *Spec, podUID types.UID) (Cleaner, error)
+	NewWrapperUnmounter(volName string, spec Spec, podUID types.UID) (Unmounter, error)
 
 	// Get cloud provider from kubelet.
 	GetCloudProvider() cloudprovider.Interface
@@ -260,7 +281,12 @@ func (pm *VolumePluginMgr) InitPlugins(plugins []VolumePlugin, host VolumeHost) 
 			allErrs = append(allErrs, fmt.Errorf("volume plugin %q was registered more than once", name))
 			continue
 		}
-		plugin.Init(host)
+		err := plugin.Init(host)
+		if err != nil {
+			glog.Errorf("Failed to load volume plugin %s, error: %s", plugin, err.Error())
+			allErrs = append(allErrs, err)
+			continue
+		}
 		pm.plugins[name] = plugin
 		glog.V(1).Infof("Loaded volume plugin %q", name)
 	}
@@ -365,15 +391,43 @@ func (pm *VolumePluginMgr) FindDeletablePluginBySpec(spec *Spec) (DeletableVolum
 
 // FindCreatablePluginBySpec fetches a persistent volume plugin by name.  If no plugin
 // is found, returns error.
-func (pm *VolumePluginMgr) FindCreatablePluginBySpec(spec *Spec) (CreatableVolumePlugin, error) {
+func (pm *VolumePluginMgr) FindCreatablePluginBySpec(spec *Spec) (ProvisionableVolumePlugin, error) {
 	volumePlugin, err := pm.FindPluginBySpec(spec)
 	if err != nil {
 		return nil, err
 	}
-	if creatableVolumePlugin, ok := volumePlugin.(CreatableVolumePlugin); ok {
-		return creatableVolumePlugin, nil
+	if provisionableVolumePlugin, ok := volumePlugin.(ProvisionableVolumePlugin); ok {
+		return provisionableVolumePlugin, nil
 	}
 	return nil, fmt.Errorf("no creatable volume plugin matched")
+}
+
+// FindAttachablePluginBySpec fetches a persistent volume plugin by name.  Unlike the other "FindPlugin" methods, this
+// does not return error if no plugin is found.  All volumes require a mounter and unmounter, but not every volume will
+// have an attacher/detacher.
+func (pm *VolumePluginMgr) FindAttachablePluginBySpec(spec *Spec) (AttachableVolumePlugin, error) {
+	volumePlugin, err := pm.FindPluginBySpec(spec)
+	if err != nil {
+		return nil, err
+	}
+	if attachableVolumePlugin, ok := volumePlugin.(AttachableVolumePlugin); ok {
+		return attachableVolumePlugin, nil
+	}
+	return nil, nil
+}
+
+// FindAttachablePluginByName fetches an attachable volume plugin by name. Unlike the other "FindPlugin" methods, this
+// does not return error if no plugin is found.  All volumes require a mounter and unmounter, but not every volume will
+// have an attacher/detacher.
+func (pm *VolumePluginMgr) FindAttachablePluginByName(name string) (AttachableVolumePlugin, error) {
+	volumePlugin, err := pm.FindPluginByName(name)
+	if err != nil {
+		return nil, err
+	}
+	if attachablePlugin, ok := volumePlugin.(AttachableVolumePlugin); ok {
+		return attachablePlugin, nil
+	}
+	return nil, nil
 }
 
 // NewPersistentVolumeRecyclerPodTemplate creates a template for a recycler pod.  By default, a recycler pod simply runs
@@ -408,7 +462,7 @@ func NewPersistentVolumeRecyclerPodTemplate() *api.Pod {
 					Name:    "pv-recycler",
 					Image:   "gcr.io/google_containers/busybox",
 					Command: []string{"/bin/sh"},
-					Args:    []string{"-c", "test -e /scrub && echo $(date) > /scrub/trash.txt && find /scrub -mindepth 1 -maxdepth 1 -delete && test -z \"$(ls -A /scrub)\" || exit 1"},
+					Args:    []string{"-c", "test -e /scrub && rm -rf /scrub/..?* /scrub/.[!.]* /scrub/*  && test -z \"$(ls -A /scrub)\" || exit 1"},
 					VolumeMounts: []api.VolumeMount{
 						{
 							Name:      "vol",

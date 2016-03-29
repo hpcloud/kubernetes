@@ -18,9 +18,10 @@
 If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
+<!-- TAG RELEASE_LINK, added by the munger automatically -->
 <strong>
 The latest release of this document can be found
-[here](http://releases.k8s.io/release-1.1/docs/user-guide/kubectl/kubectl_rolling-update.md).
+[here](http://releases.k8s.io/release-1.2/docs/user-guide/kubectl/kubectl_rolling-update.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -52,38 +53,40 @@ kubectl rolling-update OLD_CONTROLLER_NAME ([NEW_CONTROLLER_NAME] --image=NEW_CO
 
 ```
 # Update pods of frontend-v1 using new replication controller data in frontend-v2.json.
-$ kubectl rolling-update frontend-v1 -f frontend-v2.json
+kubectl rolling-update frontend-v1 -f frontend-v2.json
 
 # Update pods of frontend-v1 using JSON data passed into stdin.
-$ cat frontend-v2.json | kubectl rolling-update frontend-v1 -f -
+cat frontend-v2.json | kubectl rolling-update frontend-v1 -f -
 
 # Update the pods of frontend-v1 to frontend-v2 by just changing the image, and switching the
 # name of the replication controller.
-$ kubectl rolling-update frontend-v1 frontend-v2 --image=image:v2
+kubectl rolling-update frontend-v1 frontend-v2 --image=image:v2
 
 # Update the pods of frontend by just changing the image, and keeping the old name.
-$ kubectl rolling-update frontend --image=image:v2
+kubectl rolling-update frontend --image=image:v2
 
 # Abort and reverse an existing rollout in progress (from frontend-v1 to frontend-v2).
-$ kubectl rolling-update frontend-v1 frontend-v2 --rollback
+kubectl rolling-update frontend-v1 frontend-v2 --rollback
 
 ```
 
 ### Options
 
 ```
+      --container="": Container name which will have its image upgraded. Only relevant when --image is specified, ignored otherwise. Required when using --image on a multi-container pod
       --deployment-label-key="deployment": The key to use to differentiate between two different controllers, default 'deployment'.  Only relevant when --image is specified, ignored otherwise
       --dry-run[=false]: If true, print out the changes that would be made, but don't actually make them.
   -f, --filename=[]: Filename or URL to file to use to create the new replication controller.
       --image="": Image to use for upgrading the replication controller. Must be distinct from the existing image (either new image or new image tag).  Can not be used with --filename/-f
       --no-headers[=false]: When using the default output, don't print headers.
   -o, --output="": Output format. One of: json|yaml|wide|name|go-template=...|go-template-file=...|jsonpath=...|jsonpath-file=... See golang template [http://golang.org/pkg/text/template/#pkg-overview] and jsonpath template [http://releases.k8s.io/HEAD/docs/user-guide/jsonpath.md].
-      --output-version="": Output the formatted object with the given version (default api-version).
+      --output-version="": Output the formatted object with the given group version (for ex: 'extensions/v1beta1').
       --poll-interval=3s: Time delay between polling for replication controller status after the update. Valid time units are "ns", "us" (or "µs"), "ms", "s", "m", "h".
       --rollback[=false]: If true, this is a request to abort an existing rollout that is partially rolled out. It effectively reverses current and next and runs a rollout
       --schema-cache-dir="~/.kube/schema": If non-empty, load/store cached API schemas in this directory, default is '$HOME/.kube/schema'
   -a, --show-all[=false]: When printing, show all resources (default hide terminated pods.)
-      --sort-by="": If non-empty, sort list types using this field specification.  The field specification is expressed as a JSONPath expression (e.g. 'ObjectMeta.Name'). The field in the API resource specified by this JSONPath expression must be an integer or a string.
+      --show-labels[=false]: When printing, show all labels as the last column (default hide labels column)
+      --sort-by="": If non-empty, sort list types using this field specification.  The field specification is expressed as a JSONPath expression (e.g. '{.metadata.name}'). The field in the API resource specified by this JSONPath expression must be an integer or a string.
       --template="": Template string or path to template file to use when -o=go-template, -o=go-template-file. The template format is golang templates [http://golang.org/pkg/text/template/#pkg-overview].
       --timeout=5m0s: Max time to wait for a replication controller to update before giving up. Valid time units are "ns", "us" (or "µs"), "ms", "s", "m", "h".
       --update-period=1m0s: Time to wait between updating pods. Valid time units are "ns", "us" (or "µs"), "ms", "s", "m", "h".
@@ -94,7 +97,6 @@ $ kubectl rolling-update frontend-v1 frontend-v2 --rollback
 
 ```
       --alsologtostderr[=false]: log to standard error as well as files
-      --api-version="": The API version to use when talking to the server
       --certificate-authority="": Path to a cert. file for the certificate authority.
       --client-certificate="": Path to a client certificate file for TLS.
       --client-key="": Path to a client key file for TLS.
@@ -122,7 +124,7 @@ $ kubectl rolling-update frontend-v1 frontend-v2 --rollback
 
 * [kubectl](kubectl.md)	 - kubectl controls the Kubernetes cluster manager
 
-###### Auto generated by spf13/cobra on 24-Nov-2015
+###### Auto generated by spf13/cobra on 2-Mar-2016
 
 <!-- BEGIN MUNGE: GENERATED_ANALYTICS -->
 [![Analytics](https://kubernetes-site.appspot.com/UA-36037335-10/GitHub/docs/user-guide/kubectl/kubectl_rolling-update.md?pixel)]()

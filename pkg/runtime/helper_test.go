@@ -28,11 +28,15 @@ func TestDecodeList(t *testing.T) {
 	pl := &api.List{
 		Items: []runtime.Object{
 			&api.Pod{ObjectMeta: api.ObjectMeta{Name: "1"}},
-			&runtime.Unknown{TypeMeta: runtime.TypeMeta{Kind: "Pod", APIVersion: testapi.Default.Version()}, RawJSON: []byte(`{"kind":"Pod","apiVersion":"` + testapi.Default.Version() + `","metadata":{"name":"test"}}`)},
+			&runtime.Unknown{
+				TypeMeta:    runtime.TypeMeta{Kind: "Pod", APIVersion: testapi.Default.GroupVersion().String()},
+				Raw:         []byte(`{"kind":"Pod","apiVersion":"` + testapi.Default.GroupVersion().String() + `","metadata":{"name":"test"}}`),
+				ContentType: runtime.ContentTypeJSON,
+			},
 			&runtime.Unstructured{TypeMeta: runtime.TypeMeta{Kind: "Foo", APIVersion: "Bar"}, Object: map[string]interface{}{"test": "value"}},
 		},
 	}
-	if errs := runtime.DecodeList(pl.Items, api.Scheme); len(errs) != 0 {
+	if errs := runtime.DecodeList(pl.Items, testapi.Default.Codec()); len(errs) != 0 {
 		t.Fatalf("unexpected error %v", errs)
 	}
 	if pod, ok := pl.Items[1].(*api.Pod); !ok || pod.Name != "test" {
