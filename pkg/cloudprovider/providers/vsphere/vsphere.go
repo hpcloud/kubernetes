@@ -426,3 +426,30 @@ func (vs *VSphere) Routes() (cloudprovider.Routes, bool) {
 func (vs *VSphere) ScrubDNS(nameservers, searches []string) (nsOut, srchOut []string) {
 	return nameservers, searches
 }
+
+// Attaches given virtual disk volume to the compute running kubelet
+func (vs *VSphere) AttachDisk(diskName string) (string, error) {
+	return "", nil
+}
+
+// Detaches given virtual disk volume from the compute running kubelet
+func (vs *VSphere) DetachDisk(partialDiskId string) error {
+	return nil
+}
+
+// Returns virtual disk definition
+func (vs *VSphere) getVolume(diskName string) (*types.VirtualDisk, error) {
+	var virtualDisk types.VirtualDisk
+	return &virtualDisk, nil
+}
+
+// Create a volume of given size (in GiB)
+func (vs *VSphere) CreateVolume(name string, size int, tags *map[string]string) (volumeName string, err error) {
+
+	return "", nil
+}
+
+// Deletes a volume given volume name
+func (vs *VSphere) DeleteVolume(volumeName string) error {
+	return nil
+}
