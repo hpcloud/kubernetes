@@ -41,6 +41,8 @@ import (
 
 const ProviderName = "vsphere"
 const ActivePowerState = "poweredOn"
+const DefaultDiskController = "scsi"
+const DefaultSCSIControllerType = "lsilogic"
 
 // VSphere is an implementation of cloud provider Interface for VSphere.
 type VSphere struct {
@@ -62,6 +64,10 @@ type VSphereConfig struct {
 
 	Network struct {
 		PublicNetwork string `gcfg:"public-network"`
+	}
+	Disk struct {
+		DiskController     string `dcfg:"diskcontroller"`
+		SCSIControllerType string `dcfg:"scsicontrollertype"`
 	}
 }
 
@@ -133,6 +139,12 @@ func newVSphere(cfg VSphereConfig) (*VSphere, error) {
 		return nil, err
 	}
 
+	if cfg.Disk.DiskController == "" {
+		cfg.Disk.DiskController = DefaultDiskController
+	}
+	if cfg.Disk.SCSIControllerType == "" {
+		cfg.Disk.SCSIControllerType = DefaultSCSIControllerType
+	}
 	vs := VSphere{
 		cfg: &cfg,
 		localInstanceID: id,
@@ -427,29 +439,211 @@ func (vs *VSphere) ScrubDNS(nameservers, searches []string) (nsOut, srchOut []st
 	return nameservers, searches
 }
 
-// Attaches given virtual disk volume to the compute running kubelet
-func (vs *VSphere) AttachDisk(diskName string) (string, error) {
-	return "", nil
+// Attaches given virtual disk volume to the compute running kubelet.
+func (vs *VSphere) AttachDisk(vmDiskPath string, nodeName string) (diskID string, err error) {
+	// Create context
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Create vSphere client
+	c, err := vsphereLogin(vs.cfg, ctx)
+	if err != nil {
+		return "", err
+	}
+	defer c.Logout(ctx)
+
+	// Create a new finder
+	f := find.NewFinder(c.Client, true)
+
+	// Fetch and set data center
+	dc, err := f.Datacenter(ctx, vs.cfg.Global.Datacenter)
+	if err != nil {
+ 		return "", err
+ 	}
+	f.SetDatacenter(dc)
+
+	// Find datastores
+	ds, err := f.Datastore(ctx, vs.cfg.Global.Datastore)
+	if err != nil {
+ 		return "", err
+ 	}
+
+	// Find virtual machine to attach disk to
+	vm, err := f.VirtualMachine(ctx, nodeName)
+ 	if err != nil {
+ 		return "", err
+ 	}
+
+	// Attach disk to the running VM
+	vmDevices, err := vm.Device(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	diskController, err := vmDevices.FindDiskController(vs.cfg.Disk.DiskController)
+	if err != nil {
+		if err.Error() == "no available SCSI controller" {
+			newSCSIController, err := vmDevices.CreateSCSIController(vs.cfg.Disk.SCSIControllerType)
+			if err != nil {
+				return "", err
+			}
+
+			configNewSCSIController := newSCSIController.(types.BaseVirtualSCSIController).GetVirtualSCSIController()
+			hotAndRemove := true
+			configNewSCSIController.HotAddRemove = &hotAndRemove
+			configNewSCSIController.SharedBus = types.VirtualSCSISharing(types.VirtualSCSISharingNoSharing)
+			err = vm.AddDevice(context.TODO(), newSCSIController)
+			if err != nil {
+				return "", err
+			}
+			diskController, err = vmDevices.FindDiskController(vs.cfg.Disk.DiskController)
+			if err != nil {
+				return "", err
+			}
+		} else {
+			return "", err
+		}
+	}
+
+	disk := vmDevices.CreateDisk(diskController, ds.Reference(), vmDiskPath)
+	backing := disk.Backing.(*types.VirtualDiskFlatVer2BackingInfo)
+	backing.DiskMode = string(types.VirtualDiskModeIndependent_persistent)
+	disk = vmDevices.ChildDisk(disk)
+
+	err = vm.AddDevice(ctx, disk)
+	if err != nil {
+		return "", err
+	}
+
+	vmDevices, err = vm.Device(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	devices := vmDevices.SelectByType(disk)
+	return devices.Name(devices[len(devices)-1]), nil
 }
 
-// Detaches given virtual disk volume from the compute running kubelet
-func (vs *VSphere) DetachDisk(partialDiskId string) error {
+// Detaches given virtual disk volume from the compute running kubelet.
+func (vs *VSphere) DetachDisk(diskID string, nodeName string) error {
+	// Create context
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Create vSphere client
+	c, err := vsphereLogin(vs.cfg, ctx)
+	if err != nil {
+		return err
+	}
+	defer c.Logout(ctx)
+
+	// Create a new finder
+	f := find.NewFinder(c.Client, true)
+
+	// Fetch and set data center
+	dc, err := f.Datacenter(ctx, vs.cfg.Global.Datacenter)
+	f.SetDatacenter(dc)
+
+	// Find VM to detach disk from
+	vm, err := f.VirtualMachine(ctx, nodeName)
+ 	if err != nil {
+ 		return err
+ 	}
+
+	// Get devices from VM
+	vmDevices, err := vm.Device(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Remove disk from VM
+	device := vmDevices.Find(diskID)
+	if device == nil {
+		return fmt.Errorf("device '%s' not found", diskID)
+	}
+
+	err = vm.RemoveDevice(ctx, false, device)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
-// Returns virtual disk definition
-func (vs *VSphere) getVolume(diskName string) (*types.VirtualDisk, error) {
-	var virtualDisk types.VirtualDisk
-	return &virtualDisk, nil
+// Create a volume of given size (in KiB).
+func (vs *VSphere) CreateVolume(name string, size int, tags *map[string]string) (volumePath string, err error) {
+	// Create context
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Create vSphere client
+	c, err := vsphereLogin(vs.cfg, ctx)
+	if err != nil {
+		return "", err
+	}
+	defer c.Logout(ctx)
+
+	// Create a new finder
+	f := find.NewFinder(c.Client, true)
+
+	// Fetch and set data center
+	dc, err := f.Datacenter(ctx, vs.cfg.Global.Datacenter)
+	f.SetDatacenter(dc)
+
+	// Create a virtual disk manager
+	vmDiskPath := "[" + vs.cfg.Global.Datastore + "] " + name + ".vmdk"
+	virtualDiskManager := object.NewVirtualDiskManager(c.Client)
+
+	// Create specification for new virtual disk
+	vmDiskSpec := &types.FileBackedVirtualDiskSpec{
+		VirtualDiskSpec: types.VirtualDiskSpec{
+			AdapterType: (*tags)["adapterType"],
+			DiskType: (*tags)["diskType"],
+		},
+		CapacityKb: int64(size),
+	}
+
+	// Create virtual disk
+	task, err := virtualDiskManager.CreateVirtualDisk(ctx, vmDiskPath, dc, vmDiskSpec)
+	if err != nil {
+		return "", err
+	}
+	err = task.Wait(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	return vmDiskPath, nil
 }
 
-// Create a volume of given size (in GiB)
-func (vs *VSphere) CreateVolume(name string, size int, tags *map[string]string) (volumeName string, err error) {
+// Deletes a volume given volume name.
+func (vs *VSphere) DeleteVolume(vmDiskPath string) error {
+	// Create context
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	return "", nil
-}
+	// Create vSphere client
+	c, err := vsphereLogin(vs.cfg, ctx)
+	if err != nil {
+		return err
+	}
+	defer c.Logout(ctx)
 
-// Deletes a volume given volume name
-func (vs *VSphere) DeleteVolume(volumeName string) error {
-	return nil
+	// Create a new finder
+	f := find.NewFinder(c.Client, true)
+
+	// Fetch and set data center
+	dc, err := f.Datacenter(ctx, vs.cfg.Global.Datacenter)
+	f.SetDatacenter(dc)
+
+	// Create a virtual disk manager
+	virtualDiskManager := object.NewVirtualDiskManager(c.Client)
+
+	// Delete virtual disk
+	task, err := virtualDiskManager.DeleteVirtualDisk(ctx, vmDiskPath, dc)
+	if err != nil {
+		return err
+	}
+
+	return task.Wait(ctx)
 }
