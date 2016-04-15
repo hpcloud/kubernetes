@@ -24,26 +24,26 @@ import (
 	"testing"
 
 	"golang.org/x/net/context"
+	"k8s.io/kubernetes/pkg/util/rand"
 )
 
 func configFromEnv() (cfg VSphereConfig, ok bool) {
-	var InsecureFlag bool
-	var err error
 	cfg.Global.VCenterIP = os.Getenv("VSPHERE_VCENTER")
 	cfg.Global.VCenterPort = os.Getenv("VSPHERE_VCENTER_PORT")
 	cfg.Global.User = os.Getenv("VSPHERE_USER")
 	cfg.Global.Password = os.Getenv("VSPHERE_PASSWORD")
 	cfg.Global.Datacenter = os.Getenv("VSPHERE_DATACENTER")
 	cfg.Network.PublicNetwork = os.Getenv("VSPHERE_PUBLIC_NETWORK")
+	cfg.Global.Datastore = os.Getenv("VSPHERE_DATASTORE")
 	if os.Getenv("VSPHERE_INSECURE") != "" {
-		InsecureFlag, err = strconv.ParseBool(os.Getenv("VSPHERE_INSECURE"))
+		insecureFlag, err := strconv.ParseBool(os.Getenv("VSPHERE_INSECURE"))
+		if err != nil {
+			log.Fatal(err)
+		}
+		cfg.Global.InsecureFlag = insecureFlag
 	} else {
-		InsecureFlag = false
+		cfg.Global.InsecureFlag = false
 	}
-	if err != nil {
-		log.Fatal(err)
-	}
-	cfg.Global.InsecureFlag = InsecureFlag
 
 	ok = (cfg.Global.VCenterIP != "" &&
 		cfg.Global.User != "")
@@ -187,4 +187,55 @@ func TestInstances(t *testing.T) {
 		t.Fatalf("Instances.NodeAddresses(%s) failed: %s", srvs[0], err)
 	}
 	t.Logf("Found NodeAddresses(%s) = %s\n", srvs[0], addrs)
+}
+
+func TestVolumes(t *testing.T) {
+	cfg, ok := configFromEnv()
+	if !ok {
+		t.Skipf("No config found in environment")
+	}
+
+	vs, err := newVSphere(cfg)
+	if err != nil {
+		t.Fatalf("Failed to construct/authenticate vSphere: %s", err)
+	}
+
+	i, ok := vs.Instances()
+	if !ok {
+		t.Fatalf("Instances() returned false")
+	}
+
+	srvs, err := i.List("*")
+	if err != nil {
+		t.Fatalf("Instances.List() failed: %s", err)
+	}
+	if len(srvs) == 0 {
+		t.Fatalf("Instances.List() returned zero servers")
+	}
+
+	tags := map[string]string{
+	 	"adapterType": "lsiLogic",
+	 	"diskType": "thin",
+	}
+
+	volPath, err := vs.CreateVolume("kubernetes-test-volume-"+rand.String(10), 1 * 1024 * 1024, &tags)
+	if err != nil {
+	 	t.Fatalf("Cannot create a new VMDK volume: %v", err)
+	}
+
+	diskID, err := vs.AttachDisk(volPath, srvs[0])
+	if err != nil {
+		t.Fatalf("Cannot attach volume(%s) to VM(%s): %v", volPath, srvs[0], err)
+	}
+
+	err = vs.DetachDisk(diskID, srvs[0])
+	if err != nil {
+		t.Fatalf("Cannot detach disk(%s) from VM(%s): %v", diskID, srvs[0], err)
+	}
+	
+	// todo: Deleting a volume after detach currently not working through API or UI (vSphere)
+	// err = vs.DeleteVolume(volPath)
+	// if err != nil {
+	//  	t.Fatalf("Cannot delete VMDK volume %s: %v", volPath, err)
+	// }
 }
