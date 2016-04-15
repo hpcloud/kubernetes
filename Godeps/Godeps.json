@@ -1019,8 +1019,8 @@
 		},
 		{
 			"ImportPath": "github.com/vmware/govmomi",
-			"Comment": "v0.5.0",
-			"Rev": "c1b29993f383c32fc3fadb90892909668699810a"
+			"Comment": "v0.5.0-9-g44bb6d0",
+			"Rev": "44bb6d06af73859b63ea51c7be1cdf606bf2166a"
 		},
 		{
 			"ImportPath": "github.com/xiang90/probing",
