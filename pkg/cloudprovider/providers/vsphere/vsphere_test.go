@@ -27,20 +27,23 @@ import (
 )
 
 func configFromEnv() (cfg VSphereConfig, ok bool) {
-	cfg.Global.VCenterIp = os.Getenv("VSPHERE_VCENTER")
+	cfg.Global.VCenterIP = os.Getenv("VSPHERE_VCENTER")
 	cfg.Global.VCenterPort = os.Getenv("VSPHERE_VCENTER_PORT")
 	cfg.Global.User = os.Getenv("VSPHERE_USER")
 	cfg.Global.Password = os.Getenv("VSPHERE_PASSWORD")
 	cfg.Global.Datacenter = os.Getenv("VSPHERE_DATACENTER")
-
-	InsecureFlag, err := strconv.ParseBool(os.Getenv("VSPHERE_INSECURE"))
-	if err != nil {
-		log.Fatal(err)
+	cfg.Network.PublicNetwork = os.Getenv("VSPHERE_PUBLIC_NETWORK")
+	if os.Getenv("VSPHERE_INSECURE") != "" {
+		insecureFlag, err := strconv.ParseBool(os.Getenv("VSPHERE_INSECURE"))
+		if err != nil {
+			log.Fatal(err)
+		}
+		cfg.Global.InsecureFlag = insecureFlag
+	} else {
+		cfg.Global.InsecureFlag = false
 	}
 
-	cfg.Global.InsecureFlag = InsecureFlag
-
-	ok = (cfg.Global.VCenterIp != "" &&
+	ok = (cfg.Global.VCenterIP != "" &&
 		cfg.Global.User != "")
 
 	return
@@ -65,8 +68,8 @@ datacenter = us-west
 		t.Fatalf("Should succeed when a valid config is provided: %s", err)
 	}
 
-	if cfg.Global.VCenterIp != "0.0.0.0" {
-		t.Errorf("incorrect vcenter ip: %s", cfg.Global.VCenterIp)
+	if cfg.Global.VCenterIP != "0.0.0.0" {
+		t.Errorf("incorrect vcenter ip: %s", cfg.Global.VCenterIP)
 	}
 
 	if cfg.Global.VCenterPort != "443" {
@@ -165,4 +168,21 @@ func TestInstances(t *testing.T) {
 	}
 	t.Logf("Found servers (%d): %s\n", len(srvs), srvs)
 
+	externalId, err := i.ExternalID(srvs[0])
+	if err != nil {
+		t.Fatalf("Instances.ExternalID(%s) failed: %s", srvs[0], err)
+	}
+	t.Logf("Found ExternalID(%s) = %s\n", srvs[0], externalId)
+
+	instanceId, err := i.InstanceID(srvs[0])
+	if err != nil {
+		t.Fatalf("Instances.InstanceID(%s) failed: %s", srvs[0], err)
+	}
+	t.Logf("Found InstanceID(%s) = %s\n", srvs[0], instanceId)
+
+	addrs, err := i.NodeAddresses(srvs[0])
+	if err != nil {
+		t.Fatalf("Instances.NodeAddresses(%s) failed: %s", srvs[0], err)
+	}
+	t.Logf("Found NodeAddresses(%s) = %s\n", srvs[0], addrs)
 }
