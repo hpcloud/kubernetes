@@ -219,6 +219,8 @@ type VolumeSource struct {
 	AzureFile *AzureFileVolumeSource `json:"azureFile,omitempty"`
 	// ConfigMap represents a configMap that should populate this volume
 	ConfigMap *ConfigMapVolumeSource `json:"configMap,omitempty"`
+	// VsphereVolume represents a vSphere volume attached and mounted on kubelets host machine
+	VsphereVolume *VsphereVirtualDiskVolumeSource `json:"vsphereVolume,omitempty"`
 }
 
 // Similar to VolumeSource but meant for the administrator who creates PVs.
@@ -257,6 +259,8 @@ type PersistentVolumeSource struct {
 	Flocker *FlockerVolumeSource `json:"flocker,omitempty"`
 	// AzureFile represents an Azure File Service mount on the host and bind mount to the pod.
 	AzureFile *AzureFileVolumeSource `json:"azureFile,omitempty"`
+	// VsphereVolume represents a vSphere volume attached and mounted on kubelets host machine
+	VsphereVolume *VsphereVirtualDiskVolumeSource `json:"vsphereVolume,omitempty"`
 }
 
 type PersistentVolumeClaimVolumeSource struct {
@@ -688,6 +692,16 @@ type AzureFileVolumeSource struct {
 	// Defaults to false (read/write). ReadOnly here will force
 	// the ReadOnly setting in VolumeMounts.
 	ReadOnly bool `json:"readOnly,omitempty"`
+}
+
+// Represents a vSphere volume resource.
+type VsphereVirtualDiskVolumeSource struct {
+	// Unique id of the volume used to identify the vSphere volume
+	VolumeID string `json:"volumeID"`
+	// Filesystem type to mount.
+	// Must be a filesystem type supported by the host operating system.
+	// Ex. "ext4", "xfs", "ntfs". Implicitly inferred to be "ext4" if unspecified.
+	FSType string `json:"fsType,omitempty"`
 }
 
 // Adapts a ConfigMap into a volume.
