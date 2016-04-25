@@ -214,16 +214,16 @@ func TestVolumes(t *testing.T) {
 	}
 
 	tags := map[string]string{
-	 	"adapterType": "lsiLogic",
-	 	"diskType": "thin",
+		"adapterType": "lsiLogic",
+		"diskType":    "thin",
 	}
 
-	volPath, err := vs.CreateVolume("kubernetes-test-volume-"+rand.String(10), 1 * 1024 * 1024, &tags)
+	volPath, err := vs.CreateVolume("kubernetes-test-volume-"+rand.String(10), 1*1024*1024, &tags)
 	if err != nil {
-	 	t.Fatalf("Cannot create a new VMDK volume: %v", err)
+		t.Fatalf("Cannot create a new VMDK volume: %v", err)
 	}
 
-	diskID, err := vs.AttachDisk(volPath, "")
+	diskID, _, err := vs.AttachDisk(volPath, "")
 	if err != nil {
 		t.Fatalf("Cannot attach volume(%s) to VM(%s): %v", volPath, srvs[0], err)
 	}
@@ -232,7 +232,7 @@ func TestVolumes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Cannot detach disk(%s) from VM(%s): %v", diskID, srvs[0], err)
 	}
-	
+
 	// todo: Deleting a volume after detach currently not working through API or UI (vSphere)
 	// err = vs.DeleteVolume(volPath)
 	// if err != nil {

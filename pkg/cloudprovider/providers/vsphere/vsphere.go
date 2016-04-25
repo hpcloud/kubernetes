@@ -21,8 +21,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os/exec"
 	"net/url"
+	"os/exec"
 	"strings"
 
 	"github.com/vmware/govmomi"
@@ -53,13 +53,13 @@ type VSphere struct {
 
 type VSphereConfig struct {
 	Global struct {
-		User          string `gcfg:"user"`
-		Password      string `gcfg:"password"`
-		VCenterIP     string `gcfg:"server"`
-		VCenterPort   string `gcfg:"port"`
-		InsecureFlag  bool   `gcfg:"insecure-flag"`
-		Datacenter    string `gcfg:"datacenter"`
-		Datastore     string `gcfg:"datastore"`
+		User         string `gcfg:"user"`
+		Password     string `gcfg:"password"`
+		VCenterIP    string `gcfg:"server"`
+		VCenterPort  string `gcfg:"port"`
+		InsecureFlag bool   `gcfg:"insecure-flag"`
+		Datacenter   string `gcfg:"datacenter"`
+		Datastore    string `gcfg:"datastore"`
 	}
 
 	Network struct {
@@ -95,7 +95,7 @@ func init() {
 func readInstanceID(cfg *VSphereConfig) (string, error) {
 	cmd := exec.Command("bash", "-c", `dmidecode -t 1 | grep UUID | tr -d ' ' | cut -f 2 -d ':'`)
 	var out bytes.Buffer
-    cmd.Stdout = &out
+	cmd.Stdout = &out
 	err := cmd.Run()
 	if err != nil {
 		return "", err
@@ -146,7 +146,7 @@ func newVSphere(cfg VSphereConfig) (*VSphere, error) {
 		cfg.Disk.SCSIControllerType = DefaultSCSIControllerType
 	}
 	vs := VSphere{
-		cfg: &cfg,
+		cfg:             &cfg,
 		localInstanceID: id,
 	}
 	return &vs, nil
@@ -171,7 +171,7 @@ func vsphereLogin(cfg *VSphereConfig, ctx context.Context) (*govmomi.Client, err
 	return c, nil
 }
 
-func getVirtualMachineByName(cfg *VSphereConfig, ctx context.Context, c *govmomi.Client, name string) (*object.VirtualMachine, error){
+func getVirtualMachineByName(cfg *VSphereConfig, ctx context.Context, c *govmomi.Client, name string) (*object.VirtualMachine, error) {
 	// Create a new finder
 	f := find.NewFinder(c.Client, true)
 
@@ -192,12 +192,12 @@ func getVirtualMachineByName(cfg *VSphereConfig, ctx context.Context, c *govmomi
 	return vm, nil
 }
 
-func getVirtualMachineManagedObjectReference(ctx context.Context, c *govmomi.Client, vm *object.VirtualMachine, field string, dst interface{}) error{
+func getVirtualMachineManagedObjectReference(ctx context.Context, c *govmomi.Client, vm *object.VirtualMachine, field string, dst interface{}) error {
 	collector := property.DefaultCollector(c.Client)
 
 	// Retrieve required field from VM object
-	err := collector.RetrieveOne(ctx, vm.Reference(), []string{field}, dst);
-	if err !=nil {
+	err := collector.RetrieveOne(ctx, vm.Reference(), []string{field}, dst)
+	if err != nil {
 		return err
 	}
 	return nil
@@ -243,7 +243,7 @@ func getInstances(cfg *VSphereConfig, ctx context.Context, c *govmomi.Client, fi
 }
 
 type Instances struct {
-	cfg *VSphereConfig
+	cfg             *VSphereConfig
 	localInstanceID string
 }
 
@@ -289,13 +289,13 @@ func (i *Instances) NodeAddresses(name string) ([]api.NodeAddress, error) {
 	defer c.Logout(ctx)
 
 	vm, err := getVirtualMachineByName(i.cfg, ctx, c, name)
-	if err !=nil {
+	if err != nil {
 		return nil, err
 	}
 
 	var mvm mo.VirtualMachine
 	err = getVirtualMachineManagedObjectReference(ctx, c, vm, "guest.net", &mvm)
-	if err !=nil {
+	if err != nil {
 		return nil, err
 	}
 
@@ -347,18 +347,18 @@ func (i *Instances) ExternalID(name string) (string, error) {
 
 	var mvm mo.VirtualMachine
 	err = getVirtualMachineManagedObjectReference(ctx, c, vm, "summary", &mvm)
-	if err !=nil {
+	if err != nil {
 		return "", err
 	}
 
 	if mvm.Summary.Runtime.PowerState == ActivePowerState {
 		return vm.InventoryPath, nil
-	} 
-    
+	}
+
 	if mvm.Summary.Config.Template == false {
-	    glog.Warningf("VM %s, is not in %s state", name, ActivePowerState)
+		glog.Warningf("VM %s, is not in %s state", name, ActivePowerState)
 	} else {
-	    glog.Warningf("VM %s, is a template", name)
+		glog.Warningf("VM %s, is a template", name)
 	}
 
 	return "", cloudprovider.InstanceNotFound
@@ -381,18 +381,18 @@ func (i *Instances) InstanceID(name string) (string, error) {
 
 	var mvm mo.VirtualMachine
 	err = getVirtualMachineManagedObjectReference(ctx, c, vm, "summary", &mvm)
-	if err !=nil {
+	if err != nil {
 		return "", err
 	}
 
 	if mvm.Summary.Runtime.PowerState == ActivePowerState {
 		return "/" + vm.InventoryPath, nil
 	}
-    
+
 	if mvm.Summary.Config.Template == false {
-	    glog.Warning("VM %s, is not in %s state", name, ActivePowerState)
+		glog.Warning("VM %s, is not in %s state", name, ActivePowerState)
 	} else {
-	    glog.Warning("VM %s, is a template", name)
+		glog.Warning("VM %s, is a template", name)
 	}
 
 	return "", cloudprovider.InstanceNotFound
@@ -440,7 +440,7 @@ func (vs *VSphere) ScrubDNS(nameservers, searches []string) (nsOut, srchOut []st
 }
 
 // Attaches given virtual disk volume to the compute running kubelet.
-func (vs *VSphere) AttachDisk(vmDiskPath string, nodeName string) (diskID string, err error) {
+func (vs *VSphere) AttachDisk(vmDiskPath string, nodeName string) (diskID string, diskUUID string, err error) {
 	// Create context
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -448,7 +448,7 @@ func (vs *VSphere) AttachDisk(vmDiskPath string, nodeName string) (diskID string
 	// Create vSphere client
 	c, err := vsphereLogin(vs.cfg, ctx)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer c.Logout(ctx)
 
@@ -458,15 +458,15 @@ func (vs *VSphere) AttachDisk(vmDiskPath string, nodeName string) (diskID string
 	// Fetch and set data center
 	dc, err := f.Datacenter(ctx, vs.cfg.Global.Datacenter)
 	if err != nil {
- 		return "", err
- 	}
+		return "", "", err
+	}
 	f.SetDatacenter(dc)
 
 	// Find datastores
 	ds, err := f.Datastore(ctx, vs.cfg.Global.Datastore)
 	if err != nil {
- 		return "", err
- 	}
+		return "", "", err
+	}
 
 	// Find virtual machine to attach disk to
 	var vSphereInstance string
@@ -476,14 +476,14 @@ func (vs *VSphere) AttachDisk(vmDiskPath string, nodeName string) (diskID string
 		vSphereInstance = nodeName
 	}
 	vm, err := f.VirtualMachine(ctx, vSphereInstance)
- 	if err != nil {
- 		return "", err
- 	}
+	if err != nil {
+		return "", err
+	}
 
 	// Attach disk to the running VM
 	vmDevices, err := vm.Device(ctx)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	diskController, err := vmDevices.FindDiskController(vs.cfg.Disk.DiskController)
@@ -491,7 +491,7 @@ func (vs *VSphere) AttachDisk(vmDiskPath string, nodeName string) (diskID string
 		if err.Error() == "no available SCSI controller" {
 			newSCSIController, err := vmDevices.CreateSCSIController(vs.cfg.Disk.SCSIControllerType)
 			if err != nil {
-				return "", err
+				return "", "", err
 			}
 
 			configNewSCSIController := newSCSIController.(types.BaseVirtualSCSIController).GetVirtualSCSIController()
@@ -500,7 +500,7 @@ func (vs *VSphere) AttachDisk(vmDiskPath string, nodeName string) (diskID string
 			configNewSCSIController.SharedBus = types.VirtualSCSISharing(types.VirtualSCSISharingNoSharing)
 			err = vm.AddDevice(context.TODO(), newSCSIController)
 			if err != nil {
-				return "", err
+				return "", "", err
 			}
 			vmDevices, err = vm.Device(ctx)
 			if err != nil {
@@ -508,10 +508,10 @@ func (vs *VSphere) AttachDisk(vmDiskPath string, nodeName string) (diskID string
 			}
 			diskController, err = vmDevices.FindDiskController(vs.cfg.Disk.DiskController)
 			if err != nil {
-				return "", err
+				return "", "", err
 			}
 		} else {
-			return "", err
+			return "", "", err
 		}
 	}
 
@@ -522,16 +522,30 @@ func (vs *VSphere) AttachDisk(vmDiskPath string, nodeName string) (diskID string
 
 	err = vm.AddDevice(ctx, disk)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	vmDevices, err = vm.Device(ctx)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	devices := vmDevices.SelectByType(disk)
-	return devices.Name(devices[len(devices)-1]), nil
+	newDevice := devices[len(devices)-1]
+
+	deviceUuid := getVirtualDiskUuid(newDevice)
+
+	return devices.Name(devices[len(devices)-1]), deviceUuid, nil
+}
+
+func getVirtualDiskUuid(newDevice types.BaseVirtualDevice) string {
+	vd := newDevice.GetVirtualDevice()
+
+	if b, ok := vd.Backing.(*types.VirtualDiskFlatVer2BackingInfo); ok {
+		uuidWithNoHypens := strings.Replace(b.Uuid, "-", "", -1)
+		return uuidWithNoHypens
+	}
+	return ""
 }
 
 // Detaches given virtual disk volume from the compute running kubelet.
@@ -562,10 +576,9 @@ func (vs *VSphere) DetachDisk(diskID string, nodeName string) error {
 		vSphereInstance = nodeName
 	}
 	vm, err := f.VirtualMachine(ctx, vSphereInstance)
- 	if err != nil {
- 		return err
- 	}
-
+	if err != nil {
+		return err
+	}
 	// Get devices from VM
 	vmDevices, err := vm.Device(ctx)
 	if err != nil {
@@ -578,10 +591,10 @@ func (vs *VSphere) DetachDisk(diskID string, nodeName string) error {
 		return fmt.Errorf("device '%s' not found", diskID)
 	}
 
-	err = vm.RemoveDevice(ctx, false, device)
-	if err != nil {
-		return err
-	}
+	// err = vm.RemoveDevice(ctx, false, device)
+	// if err != nil {
+	// 	return err
+	// }
 
 	return nil
 }
@@ -614,7 +627,7 @@ func (vs *VSphere) CreateVolume(name string, size int, tags *map[string]string) 
 	vmDiskSpec := &types.FileBackedVirtualDiskSpec{
 		VirtualDiskSpec: types.VirtualDiskSpec{
 			AdapterType: (*tags)["adapterType"],
-			DiskType: (*tags)["diskType"],
+			DiskType:    (*tags)["diskType"],
 		},
 		CapacityKb: int64(size),
 	}
