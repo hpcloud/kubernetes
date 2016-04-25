@@ -223,12 +223,12 @@ func TestVolumes(t *testing.T) {
 	 	t.Fatalf("Cannot create a new VMDK volume: %v", err)
 	}
 
-	diskID, err := vs.AttachDisk(volPath, srvs[0])
+	diskID, err := vs.AttachDisk(volPath, "")
 	if err != nil {
 		t.Fatalf("Cannot attach volume(%s) to VM(%s): %v", volPath, srvs[0], err)
 	}
 
-	err = vs.DetachDisk(diskID, srvs[0])
+	err = vs.DetachDisk(diskID, "")
 	if err != nil {
 		t.Fatalf("Cannot detach disk(%s) from VM(%s): %v", diskID, srvs[0], err)
 	}

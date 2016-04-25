@@ -469,7 +469,13 @@ func (vs *VSphere) AttachDisk(vmDiskPath string, nodeName string) (diskID string
  	}
 
 	// Find virtual machine to attach disk to
-	vm, err := f.VirtualMachine(ctx, nodeName)
+	var vSphereInstance string
+	if nodeName == "" {
+		vSphereInstance = vs.localInstanceID
+	} else {
+		vSphereInstance = nodeName
+	}
+	vm, err := f.VirtualMachine(ctx, vSphereInstance)
  	if err != nil {
  		return "", err
  	}
@@ -493,6 +499,10 @@ func (vs *VSphere) AttachDisk(vmDiskPath string, nodeName string) (diskID string
 			configNewSCSIController.HotAddRemove = &hotAndRemove
 			configNewSCSIController.SharedBus = types.VirtualSCSISharing(types.VirtualSCSISharingNoSharing)
 			err = vm.AddDevice(context.TODO(), newSCSIController)
+			if err != nil {
+				return "", err
+			}
+			vmDevices, err = vm.Device(ctx)
 			if err != nil {
 				return "", err
 			}
@@ -545,7 +555,13 @@ func (vs *VSphere) DetachDisk(diskID string, nodeName string) error {
 	f.SetDatacenter(dc)
 
 	// Find VM to detach disk from
-	vm, err := f.VirtualMachine(ctx, nodeName)
+	var vSphereInstance string
+	if nodeName == "" {
+		vSphereInstance = vs.localInstanceID
+	} else {
+		vSphereInstance = nodeName
+	}
+	vm, err := f.VirtualMachine(ctx, vSphereInstance)
  	if err != nil {
  		return err
  	}
