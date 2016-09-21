@@ -82,7 +82,6 @@ func TestAttachDetach(t *testing.T) {
 	attachError := errors.New("Fake attach error")
 	detachError := errors.New("Fake detach error")
 	diskCheckError := errors.New("Fake DiskIsAttached error")
-	diskPathError := errors.New("Fake GetAttachmentDiskPath error")
 	tests := []testcase{
 		// Successful Attach call
 		{
@@ -95,7 +94,7 @@ func TestAttachDetach(t *testing.T) {
 				attacher := newAttacher(testcase)
 				return attacher.Attach(spec, instanceID)
 			},
-			expectedDevice: "/dev/sda",
+			expectedDevice: diskName,
 		},
 
 		// Disk is already attached
@@ -108,7 +107,7 @@ func TestAttachDetach(t *testing.T) {
 				attacher := newAttacher(testcase)
 				return attacher.Attach(spec, instanceID)
 			},
-			expectedDevice: "/dev/sda",
+			expectedDevice: diskName,
 		},
 
 		// DiskIsAttached fails and Attach succeeds
@@ -122,7 +121,7 @@ func TestAttachDetach(t *testing.T) {
 				attacher := newAttacher(testcase)
 				return attacher.Attach(spec, instanceID)
 			},
-			expectedDevice: "/dev/sda",
+			expectedDevice: diskName,
 		},
 
 		// Attach call fails
@@ -136,20 +135,6 @@ func TestAttachDetach(t *testing.T) {
 				return attacher.Attach(spec, instanceID)
 			},
 			expectedError: attachError,
-		},
-
-		// GetAttachmentDiskPath call fails
-		{
-			name:           "Attach_Negative_DiskPatchFails",
-			instanceID:     instanceID,
-			diskIsAttached: diskIsAttachedCall{diskName, instanceID, false, diskCheckError},
-			attach:         attachCall{diskName, instanceID, "", nil},
-			diskPath:       diskPathCall{diskName, instanceID, "", diskPathError},
-			test: func(testcase *testcase) (string, error) {
-				attacher := newAttacher(testcase)
-				return attacher.Attach(spec, instanceID)
-			},
-			expectedError: diskPathError,
 		},
 
 		// Detach succeeds
@@ -365,30 +350,6 @@ func (testcase *testcase) DiskIsAttached(diskName, instanceID string) (bool, err
 	glog.V(4).Infof("DiskIsAttached call: %s, %s, returning %v, %v", diskName, instanceID, expected.isAttached, expected.ret)
 
 	return expected.isAttached, expected.ret
-}
-
-func (testcase *testcase) GetAttachmentDiskPath(instanceID string, diskName string) (string, error) {
-	expected := &testcase.diskPath
-	if expected.diskName == "" && expected.instanceID == "" {
-		// testcase.diskPath looks uninitialized, test did not expect to
-		// call GetAttachmentDiskPath
-		testcase.t.Errorf("Unexpected GetAttachmentDiskPath call!")
-		return "", errors.New("Unexpected GetAttachmentDiskPath call!")
-	}
-
-	if expected.diskName != diskName {
-		testcase.t.Errorf("Unexpected GetAttachmentDiskPath call: expected diskName %s, got %s", expected.diskName, diskName)
-		return "", errors.New("Unexpected GetAttachmentDiskPath call: wrong diskName")
-	}
-
-	if expected.instanceID != instanceID {
-		testcase.t.Errorf("Unexpected GetAttachmentDiskPath call: expected instanceID %s, got %s", expected.instanceID, instanceID)
-		return "", errors.New("Unexpected GetAttachmentDiskPath call: wrong instanceID")
-	}
-
-	glog.V(4).Infof("GetAttachmentDiskPath call: %s, %s, returning %v, %v", diskName, instanceID, expected.retPath, expected.ret)
-
-	return expected.retPath, expected.ret
 }
 
 func (testcase *testcase) CreateVolume(name string, size int, tags *map[string]string) (volumeName string, err error) {

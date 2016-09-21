@@ -48,7 +48,6 @@ type CinderProvider interface {
 	CreateVolume(name string, size int, tags *map[string]string) (volumeName string, err error)
 	GetDevicePath(diskId string) string
 	InstanceID() (string, error)
-	GetAttachmentDiskPath(instanceID string, diskName string) (string, error)
 	DiskIsAttached(diskName, instanceID string) (bool, error)
 	Instances() (cloudprovider.Instances, bool)
 }

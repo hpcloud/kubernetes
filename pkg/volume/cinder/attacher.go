@@ -99,27 +99,12 @@ func (attacher *cinderDiskAttacher) Attach(spec *volume.Spec, hostName string) (
 		}
 	}
 
-	devicePath, err := attacher.cinderProvider.GetAttachmentDiskPath(instanceid, volumeID)
-	if err != nil {
-		glog.Infof("Attach volume %q to instance %q failed with %v", volumeID, instanceid, err)
-		return "", err
-	}
-
-	return devicePath, err
+	// Fake the "devicePath" and actually just return the Cinder ID for the volume, allowing the kubelet to find
+	// the real device path (See Issue #33128)
+	return volumeID, err
 }
 
-func (attacher *cinderDiskAttacher) WaitForAttach(spec *volume.Spec, devicePath string, timeout time.Duration) (string, error) {
-	volumeSource, _, err := getVolumeSource(spec)
-	if err != nil {
-		return "", err
-	}
-
-	volumeID := volumeSource.VolumeID
-
-	if devicePath == "" {
-		return "", fmt.Errorf("WaitForAttach failed for Cinder disk %q: devicePath is empty.", volumeID)
-	}
-
+func (attacher *cinderDiskAttacher) WaitForAttach(spec *volume.Spec, volumeID string, timeout time.Duration) (string, error) {
 	ticker := time.NewTicker(checkSleepDuration)
 	defer ticker.Stop()
 	timer := time.NewTimer(timeout)
@@ -131,13 +116,16 @@ func (attacher *cinderDiskAttacher) WaitForAttach(spec *volume.Spec, devicePath 
 		case <-ticker.C:
 			glog.V(5).Infof("Checking Cinder disk %q is attached.", volumeID)
 			probeAttachedVolume()
-			exists, err := volumeutil.PathExists(devicePath)
-			if exists && err == nil {
+
+			// Using the Cinder volume ID, find the real device path (See Issue #33128)
+			devicePath := attacher.cinderProvider.GetDevicePath(volumeID)
+
+			if devicePath != "" {
 				glog.Infof("Successfully found attached Cinder disk %q.", volumeID)
 				return devicePath, nil
 			} else {
-				//Log error, if any, and continue checking periodically
-				glog.Errorf("Error Stat Cinder disk (%q) is attached: %v", volumeID, err)
+				// Log an error, and continue checking periodically
+				glog.Errorf("Error could not find attached Cinder disk %q", volumeID)
 			}
 		case <-timer.C:
 			return "", fmt.Errorf("Could not find attached Cinder disk %q. Timeout waiting for mount paths to be created.", volumeID)
@@ -156,7 +144,14 @@ func (attacher *cinderDiskAttacher) GetDeviceMountPath(
 }
 
 // FIXME: this method can be further pruned.
-func (attacher *cinderDiskAttacher) MountDevice(spec *volume.Spec, devicePath string, deviceMountPath string) error {
+func (attacher *cinderDiskAttacher) MountDevice(spec *volume.Spec, volumeID string, deviceMountPath string) error {
+	// Using the Cinder volume ID, find the real device path (See Issue #33128)
+	devicePath := attacher.cinderProvider.GetDevicePath(volumeID)
+
+	if devicePath == "" {
+		return fmt.Errorf("MountDevice failed for Cinder disk %q: devicePath is empty.", volumeID)
+	}
+
 	mounter := attacher.host.GetMounter()
 	notMnt, err := mounter.IsLikelyNotMountPoint(deviceMountPath)
 	if err != nil {
@@ -241,11 +236,19 @@ func (detacher *cinderDiskDetacher) Detach(deviceMountPath string, hostName stri
 	return nil
 }
 
-func (detacher *cinderDiskDetacher) WaitForDetach(devicePath string, timeout time.Duration) error {
+func (detacher *cinderDiskDetacher) WaitForDetach(volumeID string, timeout time.Duration) error {
 	ticker := time.NewTicker(checkSleepDuration)
 	defer ticker.Stop()
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
+
+	// Using the Cinder volume ID, find the real device path (See Issue #33128)
+	devicePath := detacher.cinderProvider.GetDevicePath(volumeID)
+
+	if devicePath == "" {
+		// Volume has already been unmounted
+		return nil
+	}
 
 	for {
 		select {
