@@ -75,6 +75,8 @@ func TestReadConfig(t *testing.T) {
  monitor-delay = 1m
  monitor-timeout = 30s
  monitor-max-retries = 3
+ [BlockStorage]
+ trust-device-path = yes
  `))
 	if err != nil {
 		t.Fatalf("Should succeed when a valid config is provided: %s", err)
@@ -94,6 +96,9 @@ func TestReadConfig(t *testing.T) {
 	}
 	if cfg.LoadBalancer.MonitorMaxRetries != 3 {
 		t.Errorf("incorrect lb.monitormaxretries: %d", cfg.LoadBalancer.MonitorMaxRetries)
+	}
+	if cfg.BlockStorage.TrustDevicePath != true {
+		t.Errorf("incorrect bs.trustdevicepath: %v", cfg.BlockStorage.TrustDevicePath)
 	}
 }
 
@@ -252,6 +257,9 @@ func TestLoadBalancerV2(t *testing.T) {
 }
 
 func TestZones(t *testing.T) {
+	SetMetadataFixture(&FakeMetadata)
+	defer ClearMetadata()
+
 	os := OpenStack{
 		provider: &gophercloud.ProviderClient{
 			IdentityBase: "http://auth.url/",
@@ -271,6 +279,10 @@ func TestZones(t *testing.T) {
 
 	if zone.Region != "myRegion" {
 		t.Fatalf("GetZone() returned wrong region (%s)", zone.Region)
+	}
+
+	if zone.FailureDomain != "nova" {
+		t.Fatalf("GetZone() returned wrong failure domain (%s)", zone.FailureDomain)
 	}
 }
 

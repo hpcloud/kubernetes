@@ -17,7 +17,6 @@ limitations under the License.
 package openstack
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -45,12 +44,6 @@ import (
 )
 
 const ProviderName = "openstack"
-
-// metadataUrl is URL to OpenStack metadata server. It's hadrcoded IPv4
-// link-local address as documented in "OpenStack Cloud Administrator Guide",
-// chapter Compute - Networking with nova-network.
-// http://docs.openstack.org/admin-guide-cloud/compute-networking-nova.html#metadata-service
-const metadataUrl = "http://169.254.169.254/openstack/2012-08-10/meta_data.json"
 
 var ErrNotFound = errors.New("Failed to find object")
 var ErrMultipleResults = errors.New("Multiple results where only one expected")
@@ -83,14 +76,20 @@ type LoadBalancer struct {
 }
 
 type LoadBalancerOpts struct {
-	LBVersion         string     `gcfg:"lb-version"` // v1 or v2
-	SubnetId          string     `gcfg:"subnet-id"`  // required
-	FloatingNetworkId string     `gcfg:"floating-network-id"`
-	LBMethod          string     `gcfg:"lb-method"`
-	CreateMonitor     bool       `gcfg:"create-monitor"`
-	MonitorDelay      MyDuration `gcfg:"monitor-delay"`
-	MonitorTimeout    MyDuration `gcfg:"monitor-timeout"`
-	MonitorMaxRetries uint       `gcfg:"monitor-max-retries"`
+	LBVersion            string     `gcfg:"lb-version"` // overrides autodetection. v1 or v2
+	SubnetId             string     `gcfg:"subnet-id"`  // required
+	FloatingNetworkId    string     `gcfg:"floating-network-id"`
+	LBMethod             string     `gcfg:"lb-method"`
+	CreateMonitor        bool       `gcfg:"create-monitor"`
+	MonitorDelay         MyDuration `gcfg:"monitor-delay"`
+	MonitorTimeout       MyDuration `gcfg:"monitor-timeout"`
+	MonitorMaxRetries    uint       `gcfg:"monitor-max-retries"`
+	ManageSecurityGroups bool       `gcfg:"manage-security-groups"`
+	NodeSecurityGroupID  string     `gcfg:"node-security-group"`
+}
+
+type BlockStorageOpts struct {
+	TrustDevicePath bool `gcfg:"trust-device-path"` // See Issue #33128
 }
 
 // OpenStack is an implementation of cloud provider Interface for OpenStack.
@@ -98,6 +97,7 @@ type OpenStack struct {
 	provider *gophercloud.ProviderClient
 	region   string
 	lbOpts   LoadBalancerOpts
+	bsOpts   BlockStorageOpts
 	// InstanceID of the server where this OpenStack object is instantiated.
 	localInstanceID string
 }
@@ -116,6 +116,7 @@ type Config struct {
 		Region     string
 	}
 	LoadBalancer LoadBalancerOpts
+	BlockStorage BlockStorageOpts
 }
 
 func init() {
@@ -152,29 +153,12 @@ func readConfig(config io.Reader) (Config, error) {
 	}
 
 	var cfg Config
+
+	// Set default values for config params
+	cfg.BlockStorage.TrustDevicePath = false
+
 	err := gcfg.ReadInto(&cfg, config)
 	return cfg, err
-}
-
-// parseMetadataUUID reads JSON from OpenStack metadata server and parses
-// instance ID out of it.
-func parseMetadataUUID(jsonData []byte) (string, error) {
-	// We should receive an object with { 'uuid': '<uuid>' } and couple of other
-	// properties (which we ignore).
-
-	obj := struct{ UUID string }{}
-	err := json.Unmarshal(jsonData, &obj)
-	if err != nil {
-		return "", err
-	}
-
-	uuid := obj.UUID
-	if uuid == "" {
-		err = fmt.Errorf("cannot parse OpenStack metadata, got empty uuid")
-		return "", err
-	}
-
-	return uuid, nil
 }
 
 func readInstanceID() (string, error) {
@@ -188,37 +172,15 @@ func readInstanceID() (string, error) {
 		if instanceID != "" {
 			return instanceID, nil
 		}
-		// Fall through with empty instanceID and try metadata server.
+		// Fall through to metadata server lookup
 	}
-	glog.V(5).Infof("Cannot read %s: '%v', trying metadata server", instanceIDFile, err)
 
-	// Try to get JSON from metdata server.
-	resp, err := http.Get(metadataUrl)
+	md, err := getMetadata()
 	if err != nil {
-		glog.V(3).Infof("Cannot read %s: %v", metadataUrl, err)
 		return "", err
 	}
 
-	if resp.StatusCode != 200 {
-		err = fmt.Errorf("got unexpected status code when reading metadata from %s: %s", metadataUrl, resp.Status)
-		glog.V(3).Infof("%v", err)
-		return "", err
-	}
-
-	defer resp.Body.Close()
-	bodyBytes, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		glog.V(3).Infof("Cannot get HTTP response body from %s: %v", metadataUrl, err)
-		return "", err
-	}
-	instanceID, err := parseMetadataUUID(bodyBytes)
-	if err != nil {
-		glog.V(3).Infof("Cannot parse instance ID from metadata from %s: %v", metadataUrl, err)
-		return "", err
-	}
-
-	glog.V(3).Infof("Got instance id from %s: %s", metadataUrl, instanceID)
-	return instanceID, nil
+	return md.Uuid, nil
 }
 
 func newOpenStack(cfg Config) (*OpenStack, error) {
@@ -236,6 +198,7 @@ func newOpenStack(cfg Config) (*OpenStack, error) {
 		provider:        provider,
 		region:          cfg.Global.Region,
 		lbOpts:          cfg.LoadBalancer,
+		bsOpts:          cfg.BlockStorage,
 		localInstanceID: id,
 	}
 
@@ -441,9 +404,14 @@ func getAddressByName(client *gophercloud.ServiceClient, name string) (string, e
 	return addrs[0].Address, nil
 }
 
-// Implementation of Instances.CurrentNodeName
+// Implementation of Instances.CurrentNodeName.
+// Note this is *not* necessarily the same as hostname.
 func (i *Instances) CurrentNodeName(hostname string) (string, error) {
-	return hostname, nil
+	md, err := getMetadata()
+	if err != nil {
+		return "", err
+	}
+	return md.Name, nil
 }
 
 func (i *Instances) AddSSHKeyToAllInstances(user string, keyData []byte) error {
@@ -547,9 +515,18 @@ func (os *OpenStack) Zones() (cloudprovider.Zones, bool) {
 	return os, true
 }
 func (os *OpenStack) GetZone() (cloudprovider.Zone, error) {
-	glog.V(1).Infof("Current zone is %v", os.region)
+	md, err := getMetadata()
+	if err != nil {
+		return cloudprovider.Zone{}, err
+	}
 
-	return cloudprovider.Zone{Region: os.region}, nil
+	zone := cloudprovider.Zone{
+		FailureDomain: md.AvailabilityZone,
+		Region:        os.region,
+	}
+	glog.V(1).Infof("Current zone is %v", zone)
+
+	return zone, nil
 }
 
 func (os *OpenStack) Routes() (cloudprovider.Routes, bool) {
@@ -689,16 +666,25 @@ func (os *OpenStack) CreateVolume(name string, size int, tags *map[string]string
 
 // GetDevicePath returns the path of an attached block storage volume, specified by its id.
 func (os *OpenStack) GetDevicePath(diskId string) string {
+	// Build a list of candidate device paths
+	candidateDeviceNodes := []string{
+		// KVM
+		fmt.Sprintf("virtio-%s", diskId[:20]),
+		// ESXi
+		fmt.Sprintf("wwn-0x%s", strings.Replace(diskId, "-", "", -1)),
+	}
+
 	files, _ := ioutil.ReadDir("/dev/disk/by-id/")
+
 	for _, f := range files {
-		if strings.Contains(f.Name(), "virtio-") {
-			devid_prefix := f.Name()[len("virtio-"):len(f.Name())]
-			if strings.Contains(diskId, devid_prefix) {
+		for _, c := range candidateDeviceNodes {
+			if c == f.Name() {
 				glog.V(4).Infof("Found disk attached as %q; full devicepath: %s\n", f.Name(), path.Join("/dev/disk/by-id/", f.Name()))
 				return path.Join("/dev/disk/by-id/", f.Name())
 			}
 		}
 	}
+
 	glog.Warningf("Failed to find device for the diskid: %q\n", diskId)
 	return ""
 }
@@ -719,8 +705,10 @@ func (os *OpenStack) DeleteVolume(volumeName string) error {
 	return err
 }
 
-// Get device path of attached volume to the compute running kubelet
+// Get device path of attached volume to the compute running kubelet, as known by cinder
 func (os *OpenStack) GetAttachmentDiskPath(instanceID string, diskName string) (string, error) {
+	// See issue #33128 - Cinder does not always tell you the right device path, as such
+	// we must only use this value as a last resort.
 	disk, err := os.getVolume(diskName)
 	if err != nil {
 		return "", err
@@ -749,4 +737,9 @@ func (os *OpenStack) DiskIsAttached(diskName, instanceID string) (bool, error) {
 		return true, nil
 	}
 	return false, nil
+}
+
+// query if we should trust the cinder provide deviceName, See issue #33128
+func (os *OpenStack) ShouldTrustDevicePath() bool {
+	return os.bsOpts.TrustDevicePath
 }
