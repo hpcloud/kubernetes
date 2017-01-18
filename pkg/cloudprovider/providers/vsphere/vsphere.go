@@ -530,6 +530,20 @@ func (i *Instances) NodeAddresses(nodeName k8stypes.NodeName) ([]api.NodeAddress
 			)
 		}
 	}
+
+	// ensure that the "primary" IP address of the machine is always included, since the above
+	// guest.net call is limited to 16 unsorted interfaces and the e.g. eth0 iface may not have
+	// been included.
+	err = getVirtualMachineManagedObjectReference(ctx, i.client, vm, "guest.ipAddress", &mvm)
+	if err != nil {
+		return nil, err
+	}
+	api.AddToNodeAddresses(&addrs,
+		api.NodeAddress{
+			Address: mvm.Guest.IpAddress,
+		},
+	)
+
 	return addrs, nil
 }
 
