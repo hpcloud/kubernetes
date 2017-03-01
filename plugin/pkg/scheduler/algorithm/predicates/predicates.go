@@ -109,7 +109,7 @@ type predicateMetadata struct {
 
 func isVolumeConflict(volume api.Volume, pod *api.Pod) bool {
 	// fast path if there is no conflict checking targets.
-	if volume.GCEPersistentDisk == nil && volume.AWSElasticBlockStore == nil && volume.RBD == nil {
+	if volume.GCEPersistentDisk == nil && volume.AWSElasticBlockStore == nil && volume.RBD == nil && volume.VsphereVolume == nil {
 		return false
 	}
 
@@ -138,6 +138,12 @@ func isVolumeConflict(volume api.Volume, pod *api.Pod) bool {
 				return true
 			}
 		}
+
+		if volume.VsphereVolume != nil && existingVolume.VsphereVolume != nil {
+			if volume.VsphereVolume.VolumePath == existingVolume.VsphereVolume.VolumePath {
+				return true
+			}
+		}
 	}
 
 	return false
@@ -150,6 +156,7 @@ func isVolumeConflict(volume api.Volume, pod *api.Pod) bool {
 // - GCE PD allows multiple mounts as long as they're all read-only
 // - AWS EBS forbids any two pods mounting the same volume ID
 // - Ceph RBD forbids if any two pods share at least same monitor, and match pool and image.
+// - vSphere behaves like AWS EBS
 // TODO: migrate this into some per-volume specific code?
 func NoDiskConflict(pod *api.Pod, meta interface{}, nodeInfo *schedulercache.NodeInfo) (bool, []algorithm.PredicateFailureReason, error) {
 	for _, v := range pod.Spec.Volumes {
