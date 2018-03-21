@@ -73,6 +73,9 @@ func parseInfoFile(r io.Reader) ([]*Info, error) {
 			p.Optional = optionalFields
 		}
 
+		// Convert fstab escape sequence for space with space
+		p.Mountpoint = strings.Replace(p.Mountpoint, "\\040", " ", -1)
+
 		p.Fstype = postSeparatorFields[0]
 		p.Source = postSeparatorFields[1]
 		p.VfsOpts = strings.Join(postSeparatorFields[2:], " ")
