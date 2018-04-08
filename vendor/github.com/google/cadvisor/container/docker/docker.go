@@ -23,22 +23,30 @@ import (
 	dockertypes "github.com/docker/engine-api/types"
 	"golang.org/x/net/context"
 
+	"time"
+
 	"github.com/google/cadvisor/info/v1"
 	"github.com/google/cadvisor/machine"
 )
+
+const defaultTimeout = time.Second * 5
+
+func defaultContext() context.Context {
+	ctx, _ := context.WithTimeout(context.Background(), defaultTimeout)
+	return ctx
+}
 
 func Status() (v1.DockerStatus, error) {
 	client, err := Client()
 	if err != nil {
 		return v1.DockerStatus{}, fmt.Errorf("unable to communicate with docker daemon: %v", err)
 	}
-	dockerInfo, err := client.Info(context.Background())
+	dockerInfo, err := client.Info(defaultContext())
 	if err != nil {
 		return v1.DockerStatus{}, err
 	}
 
 	out := v1.DockerStatus{}
-	out.Version = VersionString()
 	out.KernelVersion = machine.KernelVersion()
 	out.OS = dockerInfo.OperatingSystem
 	out.Hostname = dockerInfo.Name
@@ -51,6 +59,11 @@ func Status() (v1.DockerStatus, error) {
 	for _, v := range dockerInfo.DriverStatus {
 		out.DriverStatus[v[0]] = v[1]
 	}
+	ver, err := VersionString()
+	if err != nil {
+		return out, err
+	}
+	out.Version = ver
 	return out, nil
 }
 
@@ -59,7 +72,7 @@ func Images() ([]v1.DockerImage, error) {
 	if err != nil {
 		return nil, fmt.Errorf("unable to communicate with docker daemon: %v", err)
 	}
-	images, err := client.ImageList(context.Background(), dockertypes.ImageListOptions{All: false})
+	images, err := client.ImageList(defaultContext(), dockertypes.ImageListOptions{All: false})
 	if err != nil {
 		return nil, err
 	}
@@ -92,14 +105,14 @@ func ValidateInfo() (*dockertypes.Info, error) {
 		return nil, fmt.Errorf("unable to communicate with docker daemon: %v", err)
 	}
 
-	dockerInfo, err := client.Info(context.Background())
+	dockerInfo, err := client.Info(defaultContext())
 	if err != nil {
 		return nil, fmt.Errorf("failed to detect Docker info: %v", err)
 	}
 
 	// Fall back to version API if ServerVersion is not set in info.
 	if dockerInfo.ServerVersion == "" {
-		version, err := client.ServerVersion(context.Background())
+		version, err := client.ServerVersion(defaultContext())
 		if err != nil {
 			return nil, fmt.Errorf("unable to get docker version: %v", err)
 		}
@@ -129,19 +142,23 @@ func ValidateInfo() (*dockertypes.Info, error) {
 }
 
 func Version() ([]int, error) {
-	return parseDockerVersion(VersionString())
+	ver, err := VersionString()
+	if err != nil {
+		return nil, err
+	}
+	return parseDockerVersion(ver)
 }
 
-func VersionString() string {
+func VersionString() (string, error) {
 	docker_version := "Unknown"
 	client, err := Client()
 	if err == nil {
-		version, err := client.ServerVersion(context.Background())
+		version, err := client.ServerVersion(defaultContext())
 		if err == nil {
 			docker_version = version.Version
 		}
 	}
-	return docker_version
+	return docker_version, err
 }
 
 // TODO: switch to a semantic versioning library.

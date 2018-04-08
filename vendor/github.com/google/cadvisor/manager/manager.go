@@ -1254,7 +1254,10 @@ func getVersionInfo() (*info.VersionInfo, error) {
 
 	kernel_version := machine.KernelVersion()
 	container_os := machine.ContainerOsVersion()
-	docker_version := docker.VersionString()
+	docker_version, err := docker.VersionString()
+	if err != nil {
+		return nil, err
+	}
 
 	return &info.VersionInfo{
 		KernelVersion:      kernel_version,
