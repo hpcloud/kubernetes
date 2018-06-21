@@ -370,7 +370,8 @@ func (kl *Kubelet) setNodeAddress(node *api.Node) error {
 		glog.V(2).Infof("Using node IP: %q", kl.nodeIP.String())
 	}
 
-	if kl.cloud != nil {
+	// ask cloud providetr only if nodeIP is not set by command line option
+	if kl.cloud != nil && kl.nodeIP == nil {
 		instances, ok := kl.cloud.Instances()
 		if !ok {
 			return fmt.Errorf("failed to get instances from cloud provider")
