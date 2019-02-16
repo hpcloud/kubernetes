@@ -26,13 +26,15 @@ import (
 	"k8s.io/kubernetes/pkg/api"
 	kcache "k8s.io/kubernetes/pkg/client/cache"
 	"k8s.io/kubernetes/pkg/controller/volume/attachdetach/cache"
+	"k8s.io/kubernetes/pkg/controller/volume/attachdetach/util"
 	"k8s.io/kubernetes/pkg/util/wait"
+	"k8s.io/kubernetes/pkg/volume"
 	"k8s.io/kubernetes/pkg/volume/util/volumehelper"
 )
 
 // DesiredStateOfWorldPopulator periodically verifies that the pods in the
-// desired state of th world still exist, if not, it removes them.
-// TODO: it also loops through the list of active pods and ensures that
+// desired state of the world still exist, if not, it removes them.
+// It also loops through the list of active pods and ensures that
 // each one exists in the desired state of the world cache
 // if it has volumes.
 type DesiredStateOfWorldPopulator interface {
@@ -47,19 +49,32 @@ type DesiredStateOfWorldPopulator interface {
 // desiredStateOfWorld - the cache to populate
 func NewDesiredStateOfWorldPopulator(
 	loopSleepDuration time.Duration,
+	listPodsRetryDuration time.Duration,
 	podInformer kcache.SharedInformer,
-	desiredStateOfWorld cache.DesiredStateOfWorld) DesiredStateOfWorldPopulator {
+	desiredStateOfWorld cache.DesiredStateOfWorld,
+	volumePluginMgr *volume.VolumePluginMgr,
+	pvcInformer kcache.SharedInformer,
+	pvInformer kcache.SharedInformer) DesiredStateOfWorldPopulator {
 	return &desiredStateOfWorldPopulator{
-		loopSleepDuration:   loopSleepDuration,
-		podInformer:         podInformer,
-		desiredStateOfWorld: desiredStateOfWorld,
+		loopSleepDuration:     loopSleepDuration,
+		listPodsRetryDuration: listPodsRetryDuration,
+		podInformer:           podInformer,
+		desiredStateOfWorld:   desiredStateOfWorld,
+		volumePluginMgr:       volumePluginMgr,
+		pvcInformer:           pvcInformer,
+		pvInformer:            pvInformer,
 	}
 }
 
 type desiredStateOfWorldPopulator struct {
-	loopSleepDuration   time.Duration
-	podInformer         kcache.SharedInformer
-	desiredStateOfWorld cache.DesiredStateOfWorld
+	loopSleepDuration     time.Duration
+	podInformer           kcache.SharedInformer
+	desiredStateOfWorld   cache.DesiredStateOfWorld
+	volumePluginMgr       *volume.VolumePluginMgr
+	pvcInformer           kcache.SharedInformer
+	pvInformer            kcache.SharedInformer
+	listPodsRetryDuration time.Duration
+	timeOfLastListPods    time.Time
 }
 
 func (dswp *desiredStateOfWorldPopulator) Run(stopCh <-chan struct{}) {
@@ -69,6 +84,18 @@ func (dswp *desiredStateOfWorldPopulator) Run(stopCh <-chan struct{}) {
 func (dswp *desiredStateOfWorldPopulator) populatorLoopFunc() func() {
 	return func() {
 		dswp.findAndRemoveDeletedPods()
+
+		// findAndAddActivePods is called periodically, independently of the main
+		// populator loop.
+		if time.Since(dswp.timeOfLastListPods) < dswp.listPodsRetryDuration {
+			glog.V(5).Infof(
+				"Skipping findAndAddActivePods(). Not permitted until %v (listPodsRetryDuration %v).",
+				dswp.timeOfLastListPods.Add(dswp.listPodsRetryDuration),
+				dswp.listPodsRetryDuration)
+
+			return
+		}
+		dswp.findAndAddActivePods()
 	}
 }
 
@@ -122,4 +149,21 @@ func (dswp *desiredStateOfWorldPopulator) findAndRemoveDeletedPods() {
 			"Removing pod %q (UID %q) from dsw because it does not exist in pod informer.", dswPodKey, dswPodUID)
 		dswp.desiredStateOfWorld.DeletePod(dswPodUID, dswPodToAdd.VolumeName, dswPodToAdd.NodeName)
 	}
+}
+
+func (dswp *desiredStateOfWorldPopulator) findAndAddActivePods() {
+	pods := dswp.podInformer.GetStore().List()
+	dswp.timeOfLastListPods = time.Now()
+
+	for _, item := range pods {
+		pod, ok := item.(*api.Pod)
+		if !ok || volumehelper.IsPodTerminated(pod, pod.Status) {
+			// Do not add volumes for terminated pods
+			continue
+		}
+		util.ProcessPodVolumes(pod, true,
+			dswp.desiredStateOfWorld, dswp.volumePluginMgr, dswp.pvcInformer, dswp.pvInformer)
+
+	}
+
 }

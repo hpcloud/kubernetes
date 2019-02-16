@@ -87,3 +87,19 @@ func GetUniqueVolumeNameFromSpec(
 			volumeName),
 		nil
 }
+
+// IsPodTerminated checks if pod is terminated
+func IsPodTerminated(pod *api.Pod, podStatus api.PodStatus) bool {
+	return podStatus.Phase == api.PodFailed || podStatus.Phase == api.PodSucceeded || (pod.DeletionTimestamp != nil && notRunning(podStatus.ContainerStatuses))
+}
+
+// notRunning returns true if every status is terminated or waiting, or the status list
+// is empty.
+func notRunning(statuses []api.ContainerStatus) bool {
+	for _, status := range statuses {
+		if status.State.Terminated == nil && status.State.Waiting == nil {
+			return false
+		}
+	}
+	return true
+}

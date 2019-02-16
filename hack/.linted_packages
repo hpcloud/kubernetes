@@ -131,6 +131,7 @@ pkg/controller/volume
 pkg/controller/volume/attachdetach/cache
 pkg/controller/volume/attachdetach/populator
 pkg/controller/volume/attachdetach/reconciler
+pkg/controller/volume/attachdetach/util
 pkg/controller/volume/cache
 pkg/controller/volume/populator
 pkg/controller/volume/reconciler
